@@ -1,0 +1,33 @@
+# Reverse-engineering workspace (huge, regenerable)
+ghidra/
+
+# Not for the public repo: proprietary product, large corpora, experiments
+OLD/
+
+# Not for the public repo: VM/infra connection guide (contains credentials)
+CONEXION-IA.md
+
+# Work-in-progress scratch (Office format-B); not part of the clean tree
+office-todo/
+
+# C build artifacts
+*.o
+*.so
+/cat-tool
+/catre
+/catre-c
+/catre-static
+tests/runtests
+tests/test_jpg_fast
+tests/test_jpg_runner
+
+# Wine / mingw harness binaries
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/

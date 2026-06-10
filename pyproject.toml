@@ -1,0 +1,22 @@
+[project]
+name = "qcf-tool"
+version = "0.1.0"
+description = "Read/write Choshuku (CAT) .qcf archives on modern systems"
+requires-python = ">=3.10"
+dependencies = [
+    "olefile>=0.46",
+    "glymur>=0.13",
+    "Pillow>=9.1",
+    "click>=8.0",
+]
+
+[project.scripts]
+catre = "qcf_tool.catre:main"
+qcf-tool = "qcf_tool.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["qcf_tool*"]
