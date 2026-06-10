@@ -1,6 +1,6 @@
 # cat-re — Choshuku / CAT Reverse Engineering
 
-A from-scratch reimplementation of the [Choshuku Professional (超圧縮)](https://web.archive.org/web/2003*/http://www.sourcenext.co.jp/) v1.0.2
+A from-scratch reimplementation of the [Choshuku Professional (超圧縮)](https://www.sourcenext.com/download/cho_pro.html) v1.0.2
 compression utility by SOURCENEXT / QuikCAT Technologies (2003).
 
 Deliverables (the C tool runs on Linux **and** Windows):
