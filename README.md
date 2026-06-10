@@ -106,6 +106,37 @@ make test
 See [docs/LINUX_PORT.md](docs/LINUX_PORT.md) for the full API and
 backend matrix.
 
+## Cloning status
+
+How complete is this as a clone of the original product? Two answers, because the
+denominator matters — **≈90 % of the engine, ≈60 % of the full desktop product**.
+
+**Engine & format** (the actual technical core — read/write `.qcf` with its codecs):
+
+| Component | Status | Notes |
+|---|:--:|---|
+| QCM container — single / multi / nested folders | ✅ **100 %** | read + write; the original engine decodes our output |
+| DEFLATE codec (generic, text, PDF, ZIP) | ✅ **100 %** | standard zlib |
+| JPEG2000 image codec (read + write, `-q`) | ✅ **~95 %** | behavioral clone; **byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) — only the `lQuality → rate` curve is empirical |
+| Office MSOC21 — whole-file variant | ✅ **100 %** | read + write, engine-validated |
+| Office MSOC21 — per-stream variant (real Word/Excel) | 🟡 **~15 %** | located in `MSOC21.dll`, not reimplemented |
+| LFC / LEADTOOLS codec | ❌ **0 %** | proprietary third-party (medical imaging) — out of scope |
+| **Engine overall** | **~90 %** | everything needed to read/write `.qcf` for files, images, folders, and generic Office |
+
+**Full product** (everything the 2003 desktop application shipped):
+
+| Layer | Status | Notes |
+|---|:--:|---|
+| Compression engine + `.qcf` format | ✅ **~90 %** | see table above |
+| CLI tool (`compress`/`extract`/`list`/`info`/`test`) | ✅ **100 %** | English CLI; functional equivalent of the original operations |
+| GUI application | ❌ **0 %** | out of scope (this is a CLI/format tool) |
+| Shell integration (context menu, Explorer preview) | ❌ **0 %** | `QCShExt` / `QCShView` / `QCArchUI` — out of scope |
+| **Full product overall** | **~60–65 %** | the gap is mostly the Windows UI layer (intentionally excluded) + the third-party LFC codec |
+
+As a `.qcf` archiving library/tool the clone is essentially complete; as a *Windows
+desktop application with its GUI*, the entire visual layer is out of scope (a different
+project). See the details below.
+
 ## Status & limitations
 
 **Reading** (fully supported, validated against real engine archives):
