@@ -169,6 +169,47 @@ Implemented & validated against the real engine: container (single/multi/**folde
 whole-file zlib). Only **LFC** (LEADTOOLS, third-party) and the per-stream Office variant remain.
 See `docs/QCF_FORMAT_SPEC.md` and `docs/RE_verified.md`.
 
+## Benchmarks
+
+Real `catre` runs on sample files, one per format the original CAT/Choshuku
+highlighted. **Ratio = compressed ÷ original** (lower is better; > 100 % means it grew).
+Sizes measured with `stat`, not estimated.
+
+**Image super-compression** — the flagship feature (lossy JPEG2000, by `-q`).
+A 628 KB photographic JPEG:
+
+| Quality `-q` | `.qcf` | Ratio | Saved |
+|:--:|--:|:--:|:--:|
+| 100 (default) | 240 KB | 38.3 % | 62 % |
+| 75 | 192 KB | 30.6 % | 69 % |
+| 50 | 144 KB | 23.0 % | 77 % |
+| 25 | 96 KB | 15.3 % | 85 % |
+| 10 | 67 KB | 10.7 % | 89 % |
+
+**Per format** (default codec):
+
+| Format | Codec | Original | `.qcf` | Ratio | Lossless? | Note |
+|---|---|--:|--:|:--:|:--:|---|
+| `.doc` (Word) | office (MSOC21) | 27,136 B | 5,835 B | **21.5 %** | ✅ | great |
+| `.xls` (Excel) | office (MSOC21) | 17,408 B | 4,011 B | **23.0 %** | ✅ | great |
+| `.txt` (text) | deflate | 20,000 B | 135 B | **0.7 %** | ✅ | repetitive text |
+| `.jpg` (photo) | image-jp2 | 643,154 B | *per `-q`* | 11–38 % | ❌ lossy | flagship (table above) |
+| `.png` | image-jp2 | 324,108 B | 97,309 B | 30.0 % | ❌ **lossy** | ⚠️ re-encoded to JPEG2000 |
+| `.pdf` | deflate | 112,246 B | 104,989 B | 93.5 % | ✅ | already compressed |
+| `.gif` | image-jp2 | 4,545 B | 6,336 B | **139 %** | ❌ lossy | ⚠️ poor fit — it *grows* |
+
+### Caveats (read before trusting a ratio)
+
+- **Images are recompressed with *lossy* JPEG2000.** By default `catre` re-encodes
+  `.jpg/.png/.gif` to JPEG2000 (lossy). For a PNG/diagram you want to keep **bit-exact**,
+  pass `--store` (stores it with lossless DEFLATE instead).
+- **Already-compressed data barely shrinks — or grows.** PDF (93.5 %), a small GIF
+  (139 %, it *grew*), and a large JPEG at high `-q` can bloat (a 4000×3000 photo at
+  `-q 100` → ~137 %). Re-compressing something already compressed is inherently a loss —
+  the original product had the same trade-off. Lower `-q` is what makes images shrink.
+- **`-q` is the lever.** The headline "super-compression" is photographic JPEG at
+  low/medium quality and Office documents — there the savings are 60–90 %.
+
 ## Project layout
 
 ```
