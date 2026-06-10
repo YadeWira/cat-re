@@ -184,6 +184,38 @@ ghidra/                  Ghidra project + scripts (git-ignored, large)
 > corpora, and experiments. It is git-ignored and **not uploaded** to the public repo.
 > The harness and some skipped tests use files under `OLD/` when present locally.
 
+## Legal & patents
+
+This is an independent, interoperability-focused reimplementation. A few notes on
+why that is on solid ground — documented as due diligence, **not as legal advice**
+(consult a lawyer for anything that matters to you):
+
+- **The "CAT" patents have expired.** "CAT" stands for *Cellular Automata Transform*,
+  invented by Olurinde E. Lafe and originally assigned to QuikCAT.com, Inc. The core
+  patents — e.g. [US6400766B1](https://patents.google.com/patent/US6400766B1/en) and
+  [US6456744B1](https://patents.google.com/patent/US6456744B1/en) (both filed 2000-04-18),
+  the CAT-encryption patent [US5677956A](https://patents.google.com/patent/US5677956A/en)
+  (1995), and the Miliki audio patent (2001) — were all filed between 1995 and 2001. US
+  utility patents run 20 years from filing, so the entire family has lapsed (the two main
+  ones are listed as *"Expired – Fee Related"*, anticipated expiration **2020-04-18**).
+  QuikCAT itself went through Chapter 11; its IP was sold off and the patents were
+  abandoned for non-payment of maintenance fees.
+
+- **This clone does not even use CAT.** Despite the original product's "CAT" branding,
+  `catre` implements only **DEFLATE** (zlib — patent-free) and **JPEG2000** (whose Part 1
+  baseline was declared royalty-free by the JPEG committee). No cellular-automata transform
+  is implemented, so the CAT patents would not read on this code even if they were still alive.
+
+- **Trademarks are separate from patents.** Names like *Choshuku*, *QuikCAT*, *Miliki*, and
+  *CAT* may have been trademarks (likely abandoned). This project only references them
+  descriptively (to say what it interoperates with) and does not present itself as, or use the
+  branding of, the original product.
+
+- **No proprietary code is redistributed.** The original DLLs, installer, and product manual
+  are kept out of this repository (see the `OLD/` note above). Everything here is either our
+  own reverse-engineered code, public-domain vendored code (`stb_image`), or
+  redistributable test fixtures (Apache POI sample documents).
+
 ## License
 
 MIT.
