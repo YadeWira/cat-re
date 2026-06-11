@@ -125,22 +125,22 @@ El codec Office tiene **dos variantes** de payload:
   El QCF header del member-office: `inner+04`=tamaño fuente, `inner+08`=**0** (el tamaño real
   está en el header MSOC21+8), tail8 = `01 00 04 00 00 00 02 01`. El `tail14` el motor lo quiere
   presente y no-cero pero **no lo valida** contra el contenido (constante sirve).
-- **per-stream** (Word/Excel *reconocidos*): NO es "zipear cada stream OLE2" — es un
-  **re-encoder estructural** del documento (caracterizado 2026-06-11 con pares reales del motor).
-  Layout del payload: `[índice: N×(u16 tag, u32 size)]` `[6B 00 terminador]` `[marcador 04 0a 00 05]`
-  `[cuerpo del modelo]`. El cuerpo NO es un solo zlib; contiene varios chunks, cada uno con
-  cabecera `... 00 00 06 00 00 00 [u32 clen] 00 00 00 00` seguida de un stream **zlib** (0x78) cuyo
-  contenido es una **representación intermedia** del doc (empieza `01 00 09 00 00 03 …`), NO los
-  streams OLE2 crudos. Ej. real (.doc 58368 B → .qcf 13122 B): índice de 7 tags
-  (0x132/0x198/0x199/0x9e/0x133/0x134/0x137); 3 blobs zlib (clen 780/1845/1097 → 1966/6026/4130 B);
-  los blobs descomprimidos (~12 KB) no reconstruyen los 58 KB por sí solos → el motor **modela**
-  el documento (estilo *precomp*) y lo reconstruye al descomprimir.
-- **Es lossy**: el propio `DecompressFile` del motor devuelve el doc con bytes de cabecera
-  distintos (coincide con la nota de que `.xls` altera el campo FONT del Workbook).
-- **Conclusión: fuera de alcance clonar.** Reimplementarlo = reimplementar el modelo estructural
-  propietario de Word/Excel de QuikCAT (parse + serialización intermedia exacta + rebuild), enorme
-  y además sin pérdida imposible. La variante **whole-file** ya cubre el caso de uso de archivar
-  Office de forma lossless. Decompresor en `MSOC21.dll`: `FUN_10068200` (wrapper inflate 1.1.3).
+- **per-stream** (Word/Excel *reconocidos*): cabecera `32 01 XX 00` (XX≠0x12) + índice
+  `[u16 tag][u32 size]` + `[6B 00]` + marcador `04 0a 00 05` + cuerpo. **NO es un solo formato:
+  el motor elige entre varios MODOS** según el documento (re-análisis 2026-06-11 con el corpus real):
+  1. **whole-file zlib (LOSSLESS)** — un blob `zlib(0x78)` que descomprime al **archivo original
+     byte-exacto**. ✅ **DECODIFICABLE** — el prototipo `nextGEN/catre-ng` lo hace (escanea el zlib del
+     payload, infla, verifica == tamaño original). Es la MINORÍA (docs `.doc` simples).
+  2. **modelo estructural** — varios blobs zlib cuyo contenido (`01 00 09 00 00 03 …`) es una
+     representación intermedia del doc (NO los streams OLE2), que el motor reconstruye al descomprimir.
+     Ej.: .doc 58 KB con objetos embebidos → 7 tags, 3 blobs (~12 KB) que no reconstruyen solos.
+  3. **cuerpo `de f8…` (.xls disperso)** — NO es deflate (ni crudo ni zlib); coder distinto/custom.
+     Compresión extrema (.xls 13.8 KB → 928 B). Opaco.
+- Modos 2 y 3: **fuera de alcance** — reversar el modelo estructural + un posible coder custom es
+  enorme, y los `.xls` alteran ~0.17% (campo FONT) → no byte-exacto. Decompresor base en
+  `MSOC21.dll`: `FUN_10068200` (wrapper inflate 1.1.3).
+- (Corrige una nota previa que decía que per-stream era *siempre* un re-encoder lossy: el modo 1 es
+  whole-file lossless y sí se decodifica.)
 
 ### Office (ratios reales medidos) ✅
 `.doc`/`.xls`/`.ppt` reales → **~7-26% del original** (ahorro 74-93%). Excelente por la redundancia
