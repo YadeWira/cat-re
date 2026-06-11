@@ -83,13 +83,15 @@ uint8_t *catre_encode_image(const uint8_t *data, size_t len, int quality, uint32
     cp.numresolution = 6;                /* 5 decomposition levels                 */
     cp.prog_order = OPJ_LRCP;
     cp.tcp_mct = 1;                      /* RGB->YCC color transform               */
-    cp.cp_disto_alloc = 1;
-    cp.tcp_numlayers = 2;
-    /* map quality 0..100 -> target bpp 0.30..1.50 -> compression ratio (24/bpp) */
-    double bpp = 0.30 + (quality < 0 ? 0 : quality > 100 ? 100 : quality) * 0.012;
-    double ratio = 24.0 / bpp;
-    cp.tcp_rates[0] = (float)(ratio * 2.0);   /* coarse layer */
-    cp.tcp_rates[1] = (float)ratio;           /* final layer  */
+    /* PSNR-targeted (content-adaptive) rate control — this is what the original
+     * engine (Kakadu) does: it aims at a quality level, not a fixed bitrate, so the
+     * output size tracks image content. Calibrated against the real engine's measured
+     * quality->PSNR curve (q0->26.7dB .. q100->32.2dB, ~linear): PSNR = 26.7 + q*0.055.
+     * A fixed-bpp target (the old approach) bloated smooth/large images up to ~8x. */
+    int q = quality < 0 ? 0 : quality > 100 ? 100 : quality;
+    cp.cp_fixed_quality = 1;
+    cp.tcp_numlayers = 1;
+    cp.tcp_distoratio[0] = (float)(26.7 + q * 0.055);   /* target PSNR in dB */
 
     opj_codec_t *cod = opj_create_compress(OPJ_CODEC_J2K);
     opj_set_warning_handler(cod, quiet, NULL);

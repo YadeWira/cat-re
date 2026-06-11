@@ -1,4 +1,4 @@
-/* CAT RE v1.1 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.2 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.1"
+#define VERSION "1.2"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0

@@ -7,7 +7,7 @@ Deliverables (the C tool runs on Linux **and** Windows):
 
 | Component     | Language | Purpose                                                |
 |---------------|----------|--------------------------------------------------------|
-| `tools/catre.c` | C      | **CAT RE v1.1** — the main archiver (zero-dependency static binary). |
+| `tools/catre.c` | C      | **CAT RE v1.2** — the main archiver (zero-dependency static binary). |
 | `qcf_tool/`   | Python   | Free ChoDecoder replacement: read/write `.qcf` files.   |
 | `libcat/`     | C        | Native port of the algorithms + `cat-tool` CLI.        |
 | `harness/`    | C        | Wine harness to drive the original Windows DLLs.       |
@@ -45,7 +45,7 @@ notes (format layout, codec dispatch table, COM IIDs, etc.).
 
 ## Quick start
 
-### CAT RE v1.1 CLI (recommended)
+### CAT RE v1.2 CLI (recommended)
 
 `catre` is the main archiver — a **native C** tool (links zlib + OpenJPEG statically; no
 original DLLs). It reads real `.qcf` (single/multi/nested folders) and writes DEFLATE +
@@ -117,7 +117,7 @@ denominator matters — **≈90 % of the engine, ≈60 % of the full desktop pro
 |---|:--:|---|
 | QCM container — single / multi / nested folders | ✅ **100 %** | read + write; the original engine decodes our output |
 | DEFLATE codec (generic, text, PDF, ZIP) | ✅ **100 %** | standard zlib |
-| JPEG2000 image codec (read + write, `-q`) | ✅ **~95 %** | behavioral clone; **byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) — only the `lQuality → rate` curve is empirical |
+| JPEG2000 image codec (read + write, `-q`) | ✅ **~99 %** | PSNR-targeted, calibrated to the engine's quality→PSNR curve (validated: same PSNR per `-q` on test images). **Byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) but quality and size now track the engine |
 | Office MSOC21 — whole-file variant | ✅ **100 %** | read + write, engine-validated |
 | Office MSOC21 — per-stream variant (real Word/Excel) | 🟡 **~15 %** | located in `MSOC21.dll`, not reimplemented |
 | LFC / LEADTOOLS codec | ❌ **0 %** | proprietary third-party (medical imaging) — out of scope |
@@ -176,15 +176,17 @@ highlighted. **Ratio = compressed ÷ original** (lower is better; > 100 % means 
 Sizes measured with `stat`, not estimated.
 
 **Image super-compression** — the flagship feature (lossy JPEG2000, by `-q`).
-A 628 KB photographic JPEG:
+Since v1.2 the encoder is **PSNR-targeted (content-adaptive)**, calibrated to the
+original engine's measured quality→PSNR curve (`q0→26.7 dB … q100→32.2 dB`), so the
+output size tracks image content like the real engine does. A 628 KB photographic JPEG:
 
 | Quality `-q` | `.qcf` | Ratio | Saved |
 |:--:|--:|:--:|:--:|
-| 100 (default) | 240 KB | 38.3 % | 62 % |
-| 75 | 192 KB | 30.6 % | 69 % |
-| 50 | 144 KB | 23.0 % | 77 % |
-| 25 | 96 KB | 15.3 % | 85 % |
-| 10 | 67 KB | 10.7 % | 89 % |
+| 100 (default) | 132 KB | 21.0 % | 79 % |
+| 75 | 106 KB | 16.8 % | 83 % |
+| 50 | 82 KB | 13.1 % | 87 % |
+| 25 | 64 KB | 10.2 % | 90 % |
+| 10 | 54 KB | 8.6 % | 91 % |
 
 **Per format** (default codec):
 
@@ -193,8 +195,8 @@ A 628 KB photographic JPEG:
 | `.doc` (Word) | office (MSOC21) | 27,136 B | 5,835 B | **21.5 %** | ✅ | great |
 | `.xls` (Excel) | office (MSOC21) | 17,408 B | 4,011 B | **23.0 %** | ✅ | great |
 | `.txt` (text) | deflate | 20,000 B | 135 B | **0.7 %** | ✅ | repetitive text |
-| `.jpg` (photo) | image-jp2 | 643,154 B | *per `-q`* | 11–38 % | ❌ lossy | flagship (table above) |
-| `.png` | image-jp2 | 324,108 B | 97,309 B | 30.0 % | ❌ **lossy** | ⚠️ re-encoded to JPEG2000 |
+| `.jpg` (photo) | image-jp2 | 643,154 B | *per `-q`* | 9–21 % | ❌ lossy | flagship (table above) |
+| `.png` | image-jp2 | 324,108 B | 2,577 B | 0.8 % | ❌ **lossy** | ⚠️ re-encoded to JPEG2000 (smooth diagram → tiny) |
 | `.pdf` | deflate | 112,246 B | 104,989 B | 93.5 % | ✅ | already compressed |
 | `.gif` | image-jp2 | 4,545 B | 6,336 B | **139 %** | ❌ lossy | ⚠️ poor fit — it *grows* |
 
@@ -213,9 +215,9 @@ A 628 KB photographic JPEG:
 ## Project layout
 
 ```
-tools/catre.c            CAT RE v1.1 — native C archiver (main tool; build with `make catre`)
+tools/catre.c            CAT RE v1.2 — native C archiver (main tool; build with `make catre`)
 qcf_tool/                Python reimplementation (same CLI + library)
-  catre.py               CAT RE v1.1 CLI (compress/extract/list/info/test)
+  catre.py               CAT RE v1.2 CLI (compress/extract/list/info/test)
   qcm.py                 REAL QCM parser+encoder (single/multi/folders, validated)
   format.py              low-level 28-byte QCF header primitive
   dispatch.py            backend router

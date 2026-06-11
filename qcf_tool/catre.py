@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CAT RE v1.1 — command-line archiver for Choshuku/CAT `.qcf` files.
+"""CAT RE v1.2 — command-line archiver for Choshuku/CAT `.qcf` files.
 
 A free, reverse-engineered reimplementation of the Choshuku Professional
 (超圧縮 / QuikCAT CAT) `.qcf` container. Reads and writes the real format
@@ -19,7 +19,7 @@ from .qcm import (
     QcmArchive, build_qcm_multi, dos_datetime_to_tuple, QcmError,
 )
 
-VERSION = "1.1"
+VERSION = "1.2"
 BANNER = r"""
   ____    _    _____   ____  _____
  / ___|  / \  |_   _| |  _ \| ____|   CAT RE v%s
