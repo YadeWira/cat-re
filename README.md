@@ -7,7 +7,7 @@ Deliverables (the C tool runs on Linux **and** Windows):
 
 | Component     | Language | Purpose                                                |
 |---------------|----------|--------------------------------------------------------|
-| `tools/catre.c` | C      | **CAT RE v1.0** — the main archiver (zero-dependency static binary). |
+| `tools/catre.c` | C      | **CAT RE v1.1** — the main archiver (zero-dependency static binary). |
 | `qcf_tool/`   | Python   | Free ChoDecoder replacement: read/write `.qcf` files.   |
 | `libcat/`     | C        | Native port of the algorithms + `cat-tool` CLI.        |
 | `harness/`    | C        | Wine harness to drive the original Windows DLLs.       |
@@ -45,7 +45,7 @@ notes (format layout, codec dispatch table, COM IIDs, etc.).
 
 ## Quick start
 
-### CAT RE v1.0 CLI (recommended)
+### CAT RE v1.1 CLI (recommended)
 
 `catre` is the main archiver — a **native C** tool (links zlib + OpenJPEG statically; no
 original DLLs). It reads real `.qcf` (single/multi/nested folders) and writes DEFLATE +
@@ -72,7 +72,7 @@ A Python implementation of the same CLI also exists: `python3 -m qcf_tool.catre 
 ### Python library (`qcf-tool`)
 
 ```bash
-# 35 tests, all green
+# 37 tests, all green
 PYTHONPATH=. python3 -m pytest tests/ -v
 
 # Inspect a .qcf file
@@ -213,9 +213,9 @@ A 628 KB photographic JPEG:
 ## Project layout
 
 ```
-tools/catre.c            CAT RE v1.0 — native C archiver (main tool; build with `make catre`)
+tools/catre.c            CAT RE v1.1 — native C archiver (main tool; build with `make catre`)
 qcf_tool/                Python reimplementation (same CLI + library)
-  catre.py               CAT RE v1.0 CLI (compress/extract/list/info/test)
+  catre.py               CAT RE v1.1 CLI (compress/extract/list/info/test)
   qcm.py                 REAL QCM parser+encoder (single/multi/folders, validated)
   format.py              low-level 28-byte QCF header primitive
   dispatch.py            backend router
