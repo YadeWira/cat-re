@@ -363,7 +363,11 @@ static int cmd_extract(int argc, char **argv){
         bar("Extracting", prog, total_out, i, n, mem[i].name);
         char target[2300];
         if (mem[i].codec==CODEC_IMAGE){          /* JPEG2000 -> decode to PNG */
-            snprintf(target,sizeof target,"%s/%s.png",out,mem[i].name);
+            /* replace the member's extension with .png (don't append: file.png -> file.png, not file.png.png) */
+            char stem[2048]; snprintf(stem,sizeof stem,"%s",mem[i].name);
+            char *dot=strrchr(stem,'.'), *slash=strrchr(stem,'/');
+            if (dot && (!slash || dot>slash)) *dot=0;     /* strip ext only if after the last '/' */
+            snprintf(target,sizeof target,"%s/%s.png",out,stem);
             mkdirs(target);
             if (catre_decode_image(d+mem[i].payoff, mem[i].comp, target)){ done++; prog+=mem[i].comp;
                 if(verbose){ bar_clear(); printf("  -> %-36s (decoded image)\n", target); } }
