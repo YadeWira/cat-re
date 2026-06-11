@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""CAT RE v1.2 — command-line archiver for Choshuku/CAT `.qcf` files.
+"""CAT RE v1.3 — pure-Python CLI for Choshuku/CAT `.qcf` files.
 
 A free, reverse-engineered reimplementation of the Choshuku Professional
-(超圧縮 / QuikCAT CAT) `.qcf` container. Reads and writes the real format
-(single-file, multi-file and nested folders) with no dependency on the
-original Windows DLLs. Compression backend: DEFLATE (zlib).
+(超圧縮 / QuikCAT CAT) `.qcf` container, with no dependency on the original
+Windows DLLs.
 
-Command set and parameters mirror the original software's operations
-(compress / extract / list / properties), exposed as a portable CLI.
+Scope of THIS (pure-Python) front-end:
+  * Reads every codec the format uses (DEFLATE, JPEG2000 image, Office MSOC21).
+  * Writes with DEFLATE (lossless), incl. multi-file and nested folders.
+  * It does NOT *encode* the JPEG2000 image or Office codecs — for that use the
+    native C tool `catre` (tools/catre.c), which is the full-featured archiver.
+
+Command set mirrors the original software (compress / extract / list / test).
 """
 from __future__ import annotations
 import argparse
@@ -19,13 +23,13 @@ from .qcm import (
     QcmArchive, build_qcm_multi, dos_datetime_to_tuple, QcmError,
 )
 
-VERSION = "1.2"
+VERSION = "1.3"
 BANNER = r"""
   ____    _    _____   ____  _____
  / ___|  / \  |_   _| |  _ \| ____|   CAT RE v%s
 | |     / _ \   | |   | |_) |  _|     Choshuku / CAT (.qcf) archiver
 | |___ / ___ \  | |   |  _ <| |___    free reverse-engineered build
- \____/_/   \_\ |_|   |_| \_\_____|   (DEFLATE backend, no original DLLs)
+ \____/_/   \_\ |_|   |_| \_\_____|   pure-Python (DEFLATE writer); reads all codecs
 """ % VERSION
 
 
@@ -78,8 +82,9 @@ def cmd_compress(args):
     total_in = sum(len(d) for _, d in members)
     ratio = len(blob) / total_in * 100 if total_in else 0
     if args.quality != 100:
-        print(f"note: -q/--quality ({args.quality}) applies to the image (JPEG2000) "
-              f"codec of the original engine; this build uses DEFLATE (lossless).")
+        print(f"note: -q/--quality ({args.quality}) drives the JPEG2000 image codec, "
+              f"which is only in the native C tool `catre`. This pure-Python front-end "
+              f"writes DEFLATE (lossless), so -q has no effect here.")
     if args.verbose:
         for name, data in members:
             print(f"  + {name}  ({_fmt_size(len(data))})")
@@ -180,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("inputs", nargs="+", metavar="FILE|DIR", help="files or folders to add")
     c.add_argument("-o", "--output", required=True, metavar="ARCHIVE.qcf", help="output archive path")
     c.add_argument("-q", "--quality", type=int, default=100, metavar="0-100",
-                   help="image quality (original engine's lQuality; this build uses DEFLATE)")
+                   help="JPEG2000 image quality — native C `catre` only; ignored by this pure-Python writer")
     c.add_argument("-v", "--verbose", action="store_true", help="list files as they are added")
     c.set_defaults(func=cmd_compress)
 

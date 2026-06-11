@@ -7,8 +7,8 @@ Deliverables (the C tool runs on Linux **and** Windows):
 
 | Component     | Language | Purpose                                                |
 |---------------|----------|--------------------------------------------------------|
-| `tools/catre.c` | C      | **CAT RE v1.2** — the main archiver (zero-dependency static binary). |
-| `qcf_tool/`   | Python   | Free ChoDecoder replacement: read/write `.qcf` files.   |
+| `tools/catre.c` | C      | **CAT RE v1.3** — the main archiver (zero-dependency static binary). |
+| `qcf_tool/`   | Python   | Pure-Python reader (all codecs) + DEFLATE writer.       |
 | `libcat/`     | C        | Native port of the algorithms + `cat-tool` CLI.        |
 | `harness/`    | C        | Wine harness to drive the original Windows DLLs.       |
 
@@ -45,7 +45,7 @@ notes (format layout, codec dispatch table, COM IIDs, etc.).
 
 ## Quick start
 
-### CAT RE v1.2 CLI (recommended)
+### CAT RE v1.3 CLI (recommended)
 
 `catre` is the main archiver — a **native C** tool (links zlib + OpenJPEG statically; no
 original DLLs). It reads real `.qcf` (single/multi/nested folders) and writes DEFLATE +
@@ -64,15 +64,20 @@ make catre-static     # fully static, zero-dependency build
 ./catre test out.qcf                             # verify integrity
 ```
 Commands mirror the original software: `compress`/`c`, `extract`/`x`, `list`/`l`,
-`info`/`i`, `test`/`t`. `-q/--quality` is the engine's `lQuality`; `--store` forces DEFLATE.
+`info`/`i`, `test`/`t`. `-q/--quality` sets the JPEG2000 **target PSNR** (q0 ≈ 26.7 dB …
+q100 ≈ 32.2 dB, calibrated to the original engine); `--store` forces lossless DEFLATE
+(use it for PNGs/diagrams you need bit-exact). Images that would *grow* under JPEG2000
+fall back to DEFLATE automatically.
 
-A Python implementation of the same CLI also exists: `python3 -m qcf_tool.catre ...`
-(source: `qcf_tool/catre.py`, used by the test suite).
+A pure-Python front-end also exists: `python3 -m qcf_tool.catre ...` (source:
+`qcf_tool/catre.py`). It **reads** every codec (DEFLATE, JPEG2000, Office) but **writes
+only DEFLATE** — the JPEG2000/Office *encoders* live solely in the native C `catre` above.
+Use it when you want a dependency-free reader/DEFLATE-writer in Python.
 
 ### Python library (`qcf-tool`)
 
 ```bash
-# 37 tests, all green
+# 39 tests, all green
 PYTHONPATH=. python3 -m pytest tests/ -v
 
 # Inspect a .qcf file
@@ -216,9 +221,9 @@ output size tracks image content like the real engine does. A 628 KB photographi
 ## Project layout
 
 ```
-tools/catre.c            CAT RE v1.2 — native C archiver (main tool; build with `make catre`)
+tools/catre.c            CAT RE v1.3 — native C archiver (main tool; build with `make catre`)
 qcf_tool/                Python reimplementation (same CLI + library)
-  catre.py               CAT RE v1.2 CLI (compress/extract/list/info/test)
+  catre.py               CAT RE v1.3 CLI (compress/extract/list/info/test)
   qcm.py                 REAL QCM parser+encoder (single/multi/folders, validated)
   format.py              low-level 28-byte QCF header primitive
   dispatch.py            backend router

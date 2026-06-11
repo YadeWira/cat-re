@@ -1,4 +1,4 @@
-/* CAT RE v1.2 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.3 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.2"
+#define VERSION "1.3"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0
@@ -248,22 +248,35 @@ static int cmd_compress(int argc, char **argv){
         int codec=CODEC_DEFLATE; uint8_t t4[4]={0x00,0x05,0x04,0x01};   /* deflate */
         size_t len=files[i].len; const uint8_t *fd=files[i].data;
         int isole2 = len>=8 && !memcmp(fd,"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",8);
+
+        /* DEFLATE baseline: cheap, never bloats. Serves as both the universal
+         * fallback and the yardstick a specialized codec must beat. */
+        uLongf cb=compressBound(len); uint8_t *defl=malloc(cb);
+        compress2(defl,&cb,fd,len,9); uint32_t defl_size=(uint32_t)cb;
+
+        /* Try JPEG2000 for images — but only keep it if it actually beats DEFLATE,
+         * so a tiny/already-compressed image (e.g. a small GIF) never *grows*. */
+        uint8_t *img=NULL; uint32_t imgsz=0;
         if (g_image && catre_is_image(files[i].name))
-            payload = catre_encode_image(fd, len, q, &psize);  /* JPEG2000 */
-        if (payload){ codec=CODEC_IMAGE; field04=(uint32_t)len; inner_csize=psize;
-                      t4[0]=0x01;t4[1]=0x01;t4[2]=0x04;t4[3]=0x01; }
-        else if (g_office && isole2){               /* MSOC21: 36-byte hdr + zlib(whole OLE2) */
-            uLongf zc=compressBound(len); uint8_t *z=malloc(zc); compress2(z,&zc,fd,len,9);
-            psize=36+(uint32_t)zc; payload=malloc(psize); uint8_t *p=payload;
+            img = catre_encode_image(fd, len, q, &imgsz);
+
+        if (img && imgsz < defl_size){              /* JPEG2000 wins */
+            payload=img; psize=imgsz; inner_csize=psize; field04=(uint32_t)len;
+            codec=CODEC_IMAGE; t4[0]=0x01;t4[1]=0x01;t4[2]=0x04;t4[3]=0x01;
+            free(defl);
+        } else if (g_office && isole2){             /* MSOC21: 36-byte hdr + zlib(whole OLE2) */
+            if (img) free(img);
+            uint32_t zc=defl_size;                  /* zlib(whole OLE2) == the deflate baseline */
+            psize=36+zc; payload=malloc(psize); uint8_t *p=payload;
             memcpy(p,"\x32\x01\x12\x00\x00\x00",6); p+=6; memcpy(p,"\x33\x02",2); p+=2;
-            wr32(p,(uint32_t)zc); p+=4; memset(p,0,6); p+=6;
+            wr32(p,zc); p+=4; memset(p,0,6); p+=6;
             memcpy(p,"\x04\x0a\x00\x05",4); p+=4; memcpy(p,MSOC_TAIL,14); p+=14;
-            memcpy(p,z,zc); free(z);
+            memcpy(p,defl,zc); free(defl);
             codec=CODEC_OLE2; field04=(uint32_t)len; inner_csize=0;  /* office: +08 stays 0 */
             t4[0]=0x00;t4[1]=0x00;t4[2]=0x02;t4[3]=0x01;
-        } else {                                    /* deflate (default / fallback) */
-            uLongf cb=compressBound(len); payload=malloc(cb);
-            compress2(payload,&cb,fd,len,9); psize=(uint32_t)cb; inner_csize=psize;
+        } else {                                    /* deflate (default / image fallback) */
+            if (img) free(img);
+            payload=defl; psize=defl_size; inner_csize=psize;
         }
         const char *bn=strrchr(files[i].name,'/');
         uint8_t ext=(uint8_t)(bn ? bn[1] : files[i].name[0]);   /* 1st char of basename */
@@ -397,7 +410,11 @@ static const char *codec_name(uint32_t c){ return c==0?"deflate":c==1?"image-jp2
 
 static int cmd_list(int argc, char **argv){
     const char *arc=NULL; int verbose=0;
-    for (int i=0;i<argc;i++){ if(!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose"))verbose=1; else arc=argv[i]; }
+    for (int i=0;i<argc;i++){
+        if(!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) verbose=1;
+        else if(!strcmp(argv[i],"--no-progress")||!strcmp(argv[i],"-p")||!strcmp(argv[i],"--progress")) {}
+        else arc=argv[i];
+    }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
     static Member mem[MAXMEM]; int n=qcm_read(d,len,mem,MAXMEM,NULL);
@@ -414,7 +431,13 @@ static int cmd_list(int argc, char **argv){
 }
 
 static int cmd_info(int argc, char **argv){
-    const char *arc=argc?argv[0]:NULL; if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
+    const char *arc=NULL;
+    for (int i=0;i<argc;i++){
+        if(!strcmp(argv[i],"--no-progress")||!strcmp(argv[i],"-p")||!strcmp(argv[i],"--progress")
+           ||!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) {}
+        else arc=argv[i];
+    }
+    if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
     uint32_t cdir; static Member mem[MAXMEM]; int n=qcm_read(d,len,mem,MAXMEM,&cdir);
     if(n<0){ printf("%s: not a QCM/.qcf container\n",arc); free(d); return 1; }
@@ -467,8 +490,15 @@ static void usage(void){
 "  list,     l   ARCHIVE.qcf [-v]                         List contents\n"
 "  info,     i   ARCHIVE.qcf                              Header & codec details\n"
 "  test,     t   ARCHIVE.qcf [-v]                         Verify integrity\n\n"
+"Compress options:\n"
+"  -q 0-100     image quality: target PSNR for JPEG2000 (q0~26.7dB .. q100~32.2dB,\n"
+"               calibrated to the original engine). Lossy; default 100.\n"
+"  --store      no special codecs — store every file with lossless DEFLATE\n"
+"               (use for PNG/diagrams you need bit-exact).\n"
+"  --no-image   don't JPEG2000-encode images (still uses Office/DEFLATE)\n\n"
 "  -p/--progress, --no-progress   force/disable the progress bar\n"
-"  -V, --version    print version\n");
+"  -V, --version    print version\n\n"
+"Images that would grow under JPEG2000 fall back to DEFLATE automatically.\n");
 }
 
 int main(int argc, char **argv){
