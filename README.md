@@ -198,17 +198,18 @@ output size tracks image content like the real engine does. A 628 KB photographi
 | `.jpg` (photo) | image-jp2 | 643,154 B | *per `-q`* | 9–21 % | ❌ lossy | flagship (table above) |
 | `.png` | image-jp2 | 324,108 B | 2,577 B | 0.8 % | ❌ **lossy** | ⚠️ re-encoded to JPEG2000 (smooth diagram → tiny) |
 | `.pdf` | deflate | 112,246 B | 104,989 B | 93.5 % | ✅ | already compressed |
-| `.gif` | image-jp2 | 4,545 B | 6,336 B | **139 %** | ❌ lossy | ⚠️ poor fit — it *grows* |
+| `.gif` | image-jp2 | 4,545 B | 10,319 B | **227 %** | ❌ lossy | ⚠️ poor fit — it *grows* |
 
 ### Caveats (read before trusting a ratio)
 
 - **Images are recompressed with *lossy* JPEG2000.** By default `catre` re-encodes
   `.jpg/.png/.gif` to JPEG2000 (lossy). For a PNG/diagram you want to keep **bit-exact**,
   pass `--store` (stores it with lossless DEFLATE instead).
-- **Already-compressed data barely shrinks — or grows.** PDF (93.5 %), a small GIF
-  (139 %, it *grew*), and a large JPEG at high `-q` can bloat (a 4000×3000 photo at
-  `-q 100` → ~137 %). Re-compressing something already compressed is inherently a loss —
-  the original product had the same trade-off. Lower `-q` is what makes images shrink.
+- **Already-compressed or tiny data can still grow.** PDF (93.5 %, almost no gain — it
+  is already DEFLATE-internally), and a small GIF (227 %, it *grows* — JPEG2000 container
+  overhead dwarfs a tiny paletted image). Re-compressing something already compressed is
+  inherently limited. *(Since v1.2 the image encoder is PSNR-targeted, so large photos no
+  longer bloat at high `-q` — a 1 MB 4000×3000 JPEG is ~10 % at `-q 100`.)*
 - **`-q` is the lever.** The headline "super-compression" is photographic JPEG at
   low/medium quality and Office documents — there the savings are 60–90 %.
 
