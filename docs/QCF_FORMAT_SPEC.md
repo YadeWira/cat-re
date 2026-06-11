@@ -72,10 +72,19 @@ El motor decide en tiempo de compresión. Byte `+0x18` del stream QCF: `1`=image
 | TIFF, WAV, HTML, EXE, binario, ZIP | ZipDLL/zlib | **DEFLATE** (zlib 1.1.3) | sí |
 | PDF | PdfProc | **DEFLATE** (zlib 1.1.3) | sí (contenido) |
 | DOC/XLS/PPT | MSOC21 | OLE2 + **DEFLATE** (zlib 1.1.3) por-stream | contenido sí; .xls no byte-exacto |
-| imágenes médicas | LFCMP13n | **LFC/CMW** (LEADTOOLS, propietario) | — |
+| TIFF / grises 8-16 bit (médico) | LFCMP13n | **LEAD CMP/CMW** (LEADTOOLS, propietario) — codec id `0x09` | NO (8-bit aquí) |
 
-**No hay compresión propietaria de Choshuku**: todo es zlib estándar o JPEG2000 (ambos públicos),
-salvo LFC que es de LEADTOOLS (terceros). ✅
+**Selección de codec de imagen por formato de ENTRADA** (verificado 2026-06-11 con el motor):
+PNG/GIF/BMP/JPG → **JPEG2000** (codec `01 01…`, payload con SOC `ff4f ff51`); **TIFF y grises de
+alta profundidad → LEAD CMP** (codec `01 09…`, sin SOC J2K). Un gris 16-bit 256×256 dio 162 B; el
+round-trip del motor lo devuelve como RGB 8-bit → **lossy**. El payload tras el wrapper empieza
+`01 00 01 18 …` + estructura `0d 00 03 00 05 00 00 00`, alta entropía (no es deflate ni J2K).
+
+**No hay compresión propietaria de Choshuku/QuikCAT**: todo es zlib o JPEG2000 (públicos), salvo
+**LEAD CMP/CMW**, que es IP de **LEAD Technologies** (no de QuikCAT): sin spec pública, sin decoder
+abierto, y LEADTOOLS se sigue vendiendo hoy → reimplementarlo está **fuera de alcance** (riesgo legal
+real, a diferencia de las patentes CAT ya expiradas). `QCLf.dll` = módulo de **licencia** QuikCAT
+(QCL=QuikCAT License, `IQCLicense`), NO el codec médico. ✅
 
 ### Wrapper de imagen (26 bytes, antes del codestream J2K) ✅ implementado
 

@@ -125,7 +125,7 @@ denominator matters — **≈90 % of the engine, ≈60 % of the full desktop pro
 | JPEG2000 image codec (read + write, `-q`) | ✅ **~99 %** | PSNR-targeted, calibrated to the engine's quality→PSNR curve (validated: same PSNR per `-q` on test images). **Byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) but quality and size now track the engine |
 | Office MSOC21 — whole-file variant | ✅ **100 %** | read + write, engine-validated |
 | Office MSOC21 — per-stream variant (real Word/Excel) | ❌ **out of scope** | characterized (2026-06): not "zip each stream" but a **lossy structural re-encoder** that models the Word/Excel document and rebuilds it — cloning it = reimplementing QuikCAT's proprietary Office model, and it can't be lossless. The whole-file variant already archives Office losslessly |
-| LFC / LEADTOOLS codec | ❌ **0 %** | proprietary third-party (medical imaging) — out of scope |
+| LFC / LEADTOOLS codec | ❌ **out of scope** | confirmed (2026-06) to be **LEAD Technologies' proprietary CMP/CMW** format (`LFCMP13n.dll`). The engine selects it by input type — **TIFF / high-bit-depth grayscale → LEAD CMP** (codec id `0x09`); PNG/GIF/BMP/JPG → JPEG2000. It is a *third party's* IP with no public spec and no open decoder (LEADTOOLS is still a sold product), so reimplementing it is off-limits — unlike the expired QuikCAT/CAT patents. Also lossy here (16-bit → 8-bit). |
 | **Engine overall** | **~90 %** | everything needed to read/write `.qcf` for files, images, folders, and generic Office |
 
 **Full product** (everything the 2003 desktop application shipped):
@@ -166,7 +166,7 @@ project). See the details below.
 | Missing | Notes |
 |---|---|
 | **The per-stream `MSOC21` variant** | For *recognized* Word/Excel docs the engine uses a **lossy structural re-encoder** (it models the document into an intermediate form, zlib-compresses parts of that model, and rebuilds the doc on decompress — even the original engine's own round-trip isn't byte-exact). This is out of scope: cloning it means reimplementing QuikCAT's proprietary Office model, and it cannot be lossless. The **whole-file** variant already archives Office losslessly. See `docs/QCF_FORMAT_SPEC.md`. |
-| **LFC / LEADTOOLS codec** | Not supported — proprietary third-party (medical-imaging) format; `LFCMP13n.dll`'s codec is not reimplemented. |
+| **LFC / LEADTOOLS codec** | Not supported. It is **LEAD Technologies' proprietary CMP/CMW** format (medical imaging), used by the engine for TIFF / high-bit-depth grayscale inputs (codec id `0x09`, not JPEG2000). It is a third party's IP — no public spec, no open decoder, and LEADTOOLS is still actively sold — so it is out of scope (and lossy here anyway). Note: `QCLf.dll` is the QuikCAT *license* module, not this codec. |
 | **Shell integration & GUI** | Context-menu handler (`QCShExt`), Explorer preview (`QCShView`), and dialogs (`QCArchUI`) are out of scope — this is a CLI/format tool. |
 
 Implemented & validated against the real engine: container (single/multi/**folders**), **DEFLATE**
