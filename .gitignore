@@ -13,6 +13,9 @@ office-todo/
 # Proprietary sample archives dropped in for analysis (contain vendor DLLs)
 miliki.qcf
 
+# Next-gen .qcf v2 design/experiment (local R&D, not published yet)
+nextGEN/
+
 # C build artifacts
 *.o
 *.so
