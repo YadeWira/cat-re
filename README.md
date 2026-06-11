@@ -124,7 +124,7 @@ denominator matters — **≈90 % of the engine, ≈60 % of the full desktop pro
 | DEFLATE codec (generic, text, PDF, ZIP) | ✅ **100 %** | standard zlib |
 | JPEG2000 image codec (read + write, `-q`) | ✅ **~99 %** | PSNR-targeted, calibrated to the engine's quality→PSNR curve (validated: same PSNR per `-q` on test images). **Byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) but quality and size now track the engine |
 | Office MSOC21 — whole-file variant | ✅ **100 %** | read + write, engine-validated |
-| Office MSOC21 — per-stream variant (real Word/Excel) | 🟡 **~15 %** | located in `MSOC21.dll`, not reimplemented |
+| Office MSOC21 — per-stream variant (real Word/Excel) | ❌ **out of scope** | characterized (2026-06): not "zip each stream" but a **lossy structural re-encoder** that models the Word/Excel document and rebuilds it — cloning it = reimplementing QuikCAT's proprietary Office model, and it can't be lossless. The whole-file variant already archives Office losslessly |
 | LFC / LEADTOOLS codec | ❌ **0 %** | proprietary third-party (medical imaging) — out of scope |
 | **Engine overall** | **~90 %** | everything needed to read/write `.qcf` for files, images, folders, and generic Office |
 
@@ -165,7 +165,7 @@ project). See the details below.
 
 | Missing | Notes |
 |---|---|
-| **Reading the per-stream `MSOC21` variant** | For *recognized* Word/Excel docs the engine emits a per-stream format (`32 01 aa…` header, no single zlib). `catre` writes/reads the **whole-file** `MSOC21` variant (engine-validated) but does not yet read the per-stream one. |
+| **The per-stream `MSOC21` variant** | For *recognized* Word/Excel docs the engine uses a **lossy structural re-encoder** (it models the document into an intermediate form, zlib-compresses parts of that model, and rebuilds the doc on decompress — even the original engine's own round-trip isn't byte-exact). This is out of scope: cloning it means reimplementing QuikCAT's proprietary Office model, and it cannot be lossless. The **whole-file** variant already archives Office losslessly. See `docs/QCF_FORMAT_SPEC.md`. |
 | **LFC / LEADTOOLS codec** | Not supported — proprietary third-party (medical-imaging) format; `LFCMP13n.dll`'s codec is not reimplemented. |
 | **Shell integration & GUI** | Context-menu handler (`QCShExt`), Explorer preview (`QCShView`), and dialogs (`QCArchUI`) are out of scope — this is a CLI/format tool. |
 

@@ -116,14 +116,22 @@ El codec Office tiene **dos variantes** de payload:
   El QCF header del member-office: `inner+04`=tamaño fuente, `inner+08`=**0** (el tamaño real
   está en el header MSOC21+8), tail8 = `01 00 04 00 00 00 02 01`. El `tail14` el motor lo quiere
   presente y no-cero pero **no lo valida** contra el contenido (constante sirve).
-- **per-stream** (Word/Excel *reconocidos*): header `32 01 aa ...`, sin un único zlib. **Localizado
-  pero NO reimplementado** (formato custom complejo). En `MSOC21.dll`: `FUN_10068200` = wrapper
-  `uncompress` (inflate "1.1.3"); su único llamador `FUN_10040960` = el decompresor formato-B
-  (switch por tipo en `+0x19`, byteswaps big-endian de width/height, índice de chunks
-  `[u16 tag][u32 size]` — p.ej. 0x198/0x199/0x133/0x134 con tamaños 99/395/4141/365, descomprime
-  cada chunk por offset). Raw-inflate directo del payload NO funciona (framing custom). Reimplementar
-  requiere trazar esa función densa + validar con muestras — desproporcionado para el valor (la
-  variante whole-file ya cubre el caso común). Entradas documentadas para retomar.
+- **per-stream** (Word/Excel *reconocidos*): NO es "zipear cada stream OLE2" — es un
+  **re-encoder estructural** del documento (caracterizado 2026-06-11 con pares reales del motor).
+  Layout del payload: `[índice: N×(u16 tag, u32 size)]` `[6B 00 terminador]` `[marcador 04 0a 00 05]`
+  `[cuerpo del modelo]`. El cuerpo NO es un solo zlib; contiene varios chunks, cada uno con
+  cabecera `... 00 00 06 00 00 00 [u32 clen] 00 00 00 00` seguida de un stream **zlib** (0x78) cuyo
+  contenido es una **representación intermedia** del doc (empieza `01 00 09 00 00 03 …`), NO los
+  streams OLE2 crudos. Ej. real (.doc 58368 B → .qcf 13122 B): índice de 7 tags
+  (0x132/0x198/0x199/0x9e/0x133/0x134/0x137); 3 blobs zlib (clen 780/1845/1097 → 1966/6026/4130 B);
+  los blobs descomprimidos (~12 KB) no reconstruyen los 58 KB por sí solos → el motor **modela**
+  el documento (estilo *precomp*) y lo reconstruye al descomprimir.
+- **Es lossy**: el propio `DecompressFile` del motor devuelve el doc con bytes de cabecera
+  distintos (coincide con la nota de que `.xls` altera el campo FONT del Workbook).
+- **Conclusión: fuera de alcance clonar.** Reimplementarlo = reimplementar el modelo estructural
+  propietario de Word/Excel de QuikCAT (parse + serialización intermedia exacta + rebuild), enorme
+  y además sin pérdida imposible. La variante **whole-file** ya cubre el caso de uso de archivar
+  Office de forma lossless. Decompresor en `MSOC21.dll`: `FUN_10068200` (wrapper inflate 1.1.3).
 
 ### Office (ratios reales medidos) ✅
 `.doc`/`.xls`/`.ppt` reales → **~7-26% del original** (ahorro 74-93%). Excelente por la redundancia
