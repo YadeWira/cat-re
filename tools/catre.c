@@ -1,4 +1,4 @@
-/* CAT RE v1.3 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.4 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.3"
+#define VERSION "1.4"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0
@@ -41,6 +41,12 @@ uint8_t *catre_encode_image(const uint8_t *data, size_t len, int quality, uint32
 int catre_decode_image(const uint8_t *payload, uint32_t len, const char *out_path);
 #define CODEC_IMAGE 1
 #define CODEC_OLE2  2
+/* codecs we recognize but can't decode (proprietary to the original engine) */
+#define CODEC_OFFICE_PS 3   /* MSOC21 per-stream: lossy structural re-encoder      */
+#define CODEC_LEAD      4   /* LEAD Technologies CMP/CMW (TIFF/medical), 3rd-party  */
+#define CODEC_UNKNOWN   5
+static const char *codec_name(uint32_t c);
+static int codec_decodable(uint32_t c);
 /* MSOC21 36-byte header tail (engine wants it present & non-zero; not content-validated) */
 static const uint8_t MSOC_TAIL[14]={0xde,0xf9,0x0b,0x45,0x71,0x1b,0xe4,0x00,0x46,0xcb,0x1f,0xe3,0x34,0x00};
 
@@ -100,7 +106,26 @@ static uint8_t *read_file(const char *path, size_t *len){
     fclose(f); *len=n; return d;
 }
 
-/* parse a QCM container; returns member count, fills mem[] (caps at MAXMEM) */
+/* Classify a member's codec by inspecting its QCF header (+ payload start).
+ * `qcf` = byte offset of the QCF magic. Recognizes codecs we can't decode too. */
+static int classify_codec(const uint8_t *d, size_t len, size_t qcf){
+    if (qcf+0x1c>len) return CODEC_UNKNOWN;
+    uint8_t c0=d[qcf+0x18], c1=d[qcf+0x19], ext=d[qcf+0x1b];
+    size_t pay=qcf+0x1c+ext;
+    if (c0==0x01 && c1==0x09) return CODEC_LEAD;        /* LEAD CMP/CMW (TIFF/medical) */
+    if (c0==0x01) return CODEC_IMAGE;                   /* JPEG2000                    */
+    if (pay+4<=len && d[pay]==0x32 && d[pay+1]==0x01){  /* MSOC21 office               */
+        if (!memcmp(d+pay,"\x32\x01\x12\x00",4)) return CODEC_OLE2;   /* whole-file (decodable) */
+        return CODEC_OFFICE_PS;                         /* per-stream (structural, opaque)        */
+    }
+    return CODEC_DEFLATE;
+}
+
+/* parse a QCM container; returns member count, fills mem[] (caps at MAXMEM).
+ * Robust: if the stream walk can't locate the central directory (e.g. members use
+ * the engine's proprietary per-stream office / LEAD codecs, or an image whose `comp`
+ * is the codestream size only), it falls back to scanning for the "TOP" directory
+ * record so the archive can still be LISTED and the decodable members extracted. */
 static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_t *cdir_out){
     if (len<0x24 || rd32(d)!=MAGIC_QCM) return -1;
     /* walk streams: stream1 @ +0x08 (no prefix); others have a 4-byte size prefix */
@@ -109,19 +134,30 @@ static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_
     while (off+0x1c<=len){
         size_t hdr = first?off:off+4;
         if (hdr+0x1c>len || rd32(d+hdr)!=MAGIC_QCF) break;
-        uint32_t comp=rd32(d+hdr+0x08); uint8_t codec=d[hdr+0x18], ext=d[hdr+0x1b];
+        uint32_t comp=rd32(d+hdr+0x08); uint8_t ext=d[hdr+0x1b];
         size_t payoff=hdr+0x1c+ext;
-        if (comp==0 && codec==0 && payoff+12<=len && !memcmp(d+payoff,"\x32\x01\x12\x00",4)){
-            comp = 36 + rd32(d+payoff+8);   /* MSOC21 office: 36B header + zlib(whole OLE2) */
-            codec = CODEC_OLE2;
+        int codec=classify_codec(d,len,hdr);   /* distinguishes JP2/LEAD and office whole-file/per-stream */
+        if (codec==CODEC_OLE2 && comp==0 && payoff+12<=len){
+            comp = 36 + rd32(d+payoff+8);   /* MSOC21 office whole-file: 36B header + zlib(whole OLE2) */
         }
         if (ns<MAXMEM){ st[ns].so=hdr-4; st[ns].hdr=hdr; st[ns].comp=comp;
                         st[ns].payoff=payoff; st[ns].codec=codec; ns++; }
         off=payoff+comp; first=0;
     }
-    size_t cdir=off; if(cdir_out)*cdir_out=cdir;
-    /* directory: 9 zeros, dt(4), 4 zeros, [namelen=3][00 00]"TOP", then records */
-    size_t p=cdir+9+4+4; uint8_t tl=d[p]; p+=3;
+    /* central directory: trust the walk if it landed on the "TOP" record... */
+    size_t cdir=off;
+    int strict=1;
+    int top_ok = (cdir+20+3<=len && d[cdir+17]==3 && !memcmp(d+cdir+20,"TOP",3));
+    if (!top_ok){
+        /* ...otherwise scan for the last "[03 00 00]TOP" record (proprietary-codec/image files) */
+        long found=-1;
+        for (size_t i=0; i+6<=len; i++)
+            if (d[i]==3 && d[i+1]==0 && d[i+2]==0 && !memcmp(d+i+3,"TOP",3)) found=(long)i;
+        if (found<17) return -1;
+        cdir=(size_t)found-17; strict=0;
+    }
+    if(cdir_out)*cdir_out=cdir;
+    size_t p=cdir+9+4+4; if (p+3>len) return -1; uint8_t tl=d[p]; p+=3;
     if (memcmp(d+p,"TOP",3)!=0) return -1;
     p+=tl;
     /* collect records (offset, parent, stream_off, type, orig, dt, name) */
@@ -135,7 +171,9 @@ static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_
         uint32_t orig=rd32(d+p); p+=4;
         uint8_t nl=d[p]; p+=1; p+=2;
         if (p+nl>len) break;
-        if (type==0x02){ int found=0; for(int i=0;i<ns;i++) if(st[i].so==so){found=1;break;} if(!found) break; }
+        /* strict (normal files): stop at the first record without a walked stream;
+         * fallback mode: accept all (streams weren't walkable). */
+        if (strict && type==0x02){ int found=0; for(int i=0;i<ns;i++) if(st[i].so==so){found=1;break;} if(!found) break; }
         rec[nr].off=roff; rec[nr].parent=parent; rec[nr].so=so; rec[nr].type=type;
         rec[nr].orig=orig; rec[nr].dt=dt;
         int cn=nl<255?nl:255; memcpy(rec[nr].name,d+p,cn); rec[nr].name[cn]=0;
@@ -155,11 +193,20 @@ static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_
             if (rec[idx].parent==cdir || rec[idx].parent==rec[idx].off) break;
             cur=rec[idx].parent;
         }
-        int si=-1; for(int j=0;j<ns;j++) if(st[j].so==rec[i].so){si=j;break;}
-        if (si<0) continue;
         strncpy(mem[m].name,path,sizeof mem[m].name-1);
-        mem[m].orig=rec[i].orig; mem[m].comp=st[si].comp; mem[m].codec=st[si].codec;
-        mem[m].dt=rec[i].dt; mem[m].payoff=st[si].payoff; mem[m].hdr=st[si].hdr; m++;
+        mem[m].orig=rec[i].orig; mem[m].dt=rec[i].dt;
+        int si=-1; for(int j=0;j<ns;j++) if(st[j].so==rec[i].so){si=j;break;}
+        if (si>=0){                                  /* walked stream: full info */
+            mem[m].comp=st[si].comp; mem[m].codec=st[si].codec;
+            mem[m].payoff=st[si].payoff; mem[m].hdr=st[si].hdr;
+        } else {                                     /* fallback: derive from the QCF header */
+            size_t qcf=(size_t)rec[i].so+4;
+            if (qcf+0x1c>len) continue;
+            uint8_t ext=d[qcf+0x1b];
+            mem[m].hdr=(uint32_t)qcf; mem[m].payoff=(uint32_t)(qcf+0x1c+ext);
+            mem[m].codec=classify_codec(d,len,qcf); mem[m].comp=0;  /* size unknown for opaque codecs */
+        }
+        m++;
     }
     return m;
 }
@@ -372,9 +419,18 @@ static int cmd_extract(int argc, char **argv){
     size_t total_out=0; for(int i=0;i<n;i++) total_out+=mem[i].codec?mem[i].comp:mem[i].orig;
     double t0=now_sec(); size_t prog=0;
     int done=0;
+    int skipped=0;
     for (int i=0;i<n;i++){
         bar("Extracting", prog, total_out, i, n, mem[i].name);
         char target[2300];
+        if (!codec_decodable(mem[i].codec)){     /* proprietary codec — needs the original engine */
+            bar_clear();
+            fprintf(stderr,"  SKIP %s: codec '%s' needs the original Choshuku engine "
+                           "(%s) — cannot decode\n", mem[i].name, codec_name(mem[i].codec),
+                    mem[i].codec==CODEC_OFFICE_PS ? "lossy Office structural re-encoder" :
+                    mem[i].codec==CODEC_LEAD ? "LEAD CMP/CMW, third-party" : "unsupported");
+            skipped++; continue;
+        }
         if (mem[i].codec==CODEC_IMAGE){          /* JPEG2000 -> decode to PNG */
             /* replace the member's extension with .png (don't append: file.png -> file.png, not file.png.png) */
             char stem[2048]; snprintf(stem,sizeof stem,"%s",mem[i].name);
@@ -382,7 +438,10 @@ static int cmd_extract(int argc, char **argv){
             if (dot && (!slash || dot>slash)) *dot=0;     /* strip ext only if after the last '/' */
             snprintf(target,sizeof target,"%s/%s.png",out,stem);
             mkdirs(target);
-            if (catre_decode_image(d+mem[i].payoff, mem[i].comp, target)){ done++; prog+=mem[i].comp;
+            /* feed the whole remaining buffer: our `comp` includes the 26B wrapper but the
+             * engine's `comp` is the codestream only — OpenJPEG stops at EOC, so over-feeding
+             * is safe and avoids truncating engine codestreams. */
+            if (catre_decode_image(d+mem[i].payoff, (uint32_t)(len-mem[i].payoff), target)){ done++; prog+=mem[i].comp;
                 if(verbose){ bar_clear(); printf("  -> %-36s (decoded image)\n", target); } }
             else { bar_clear(); fprintf(stderr,"  FAILED decode: %s\n",mem[i].name); }
             continue;
@@ -401,12 +460,18 @@ static int cmd_extract(int argc, char **argv){
     bar("Extracting", total_out, total_out, n, n, "done");
     bar_clear();
     double dt_s=now_sec()-t0; char a[16],sp[16];
-    printf("Extracted %d file(s) to %s/ (%s, %.2fs, %s/s)\n", done, out,
-           human((double)prog,a), dt_s, human(dt_s>0?prog/dt_s:prog, sp));
+    printf("Extracted %d file(s) to %s/ (%s, %.2fs, %s/s)%s\n", done, out,
+           human((double)prog,a), dt_s, human(dt_s>0?prog/dt_s:prog, sp),
+           skipped?" — some members skipped (proprietary codec)":"");
     free(d); return 0;
 }
 
-static const char *codec_name(uint32_t c){ return c==0?"deflate":c==1?"image-jp2":c==2?"office":"other"; }
+static const char *codec_name(uint32_t c){
+    return c==CODEC_DEFLATE?"deflate":c==CODEC_IMAGE?"image-jp2":c==CODEC_OLE2?"office":
+           c==CODEC_OFFICE_PS?"office-ps":c==CODEC_LEAD?"lead-cmp":"unknown";
+}
+/* can we actually decode this codec, or does it need the original engine? */
+static int codec_decodable(uint32_t c){ return c<=CODEC_OLE2; }
 
 static int cmd_list(int argc, char **argv){
     const char *arc=NULL; int verbose=0;

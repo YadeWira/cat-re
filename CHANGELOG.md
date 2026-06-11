@@ -3,6 +3,23 @@
 All notable changes to **CAT RE** (the native `catre` archiver). Dates are UTC.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.4 — 2026-06-11
+
+### Fixed
+- **Reads `.qcf` archives the original engine produced.** Earlier versions wrongly
+  rejected real engine files — including the engine's own **JPEG2000 images** — with
+  "not a valid .qcf". Root causes, both fixed:
+  - `qcm_read` assumed a member's `comp` field includes the 26-byte image wrapper, but
+    the engine stores the codestream size only, so the stream walk missed the central
+    directory. Added a fallback that locates the directory by scanning for the `TOP`
+    record, so any engine archive can be listed and its decodable members extracted.
+  - OpenJPEG memory-stream `skip`/`seek` callbacks didn't clamp at EOF, overflowing the
+    read cursor on some engine (Kakadu) codestreams; `extract` also fed a truncated
+    buffer. Engine images (e.g. 1920×1200) now decode correctly.
+- **Graceful handling of undecodable proprietary codecs.** `list` now identifies
+  per-stream Office (`office-ps`) and LEAD CMP (`lead-cmp`) members; `extract` skips them
+  with a clear "needs the original engine" message instead of failing the archive.
+
 ## v1.3 — 2026-06-11
 
 ### Added

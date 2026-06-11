@@ -39,11 +39,24 @@ static OPJ_SIZE_T mem_write(void *buf, OPJ_SIZE_T n, void *ud){
     memcpy(m->p+m->n, buf, n); m->n+=n; return n;
 }
 static OPJ_SIZE_T mem_read(void *buf, OPJ_SIZE_T n, void *ud){
-    MemBuf *m=ud; size_t avail=m->n - m->pos; if (avail==0) return (OPJ_SIZE_T)-1;
+    MemBuf *m=ud;
+    if (m->pos >= m->n) return (OPJ_SIZE_T)-1;     /* EOF (pos>=size, no underflow) */
+    size_t avail=m->n - m->pos;
     if (n>avail) n=avail; memcpy(buf, m->p+m->pos, n); m->pos+=n; return n;
 }
-static OPJ_OFF_T mem_skip(OPJ_OFF_T n, void *ud){ MemBuf *m=ud; m->pos+=n; return n; }
-static OPJ_BOOL mem_seek(OPJ_OFF_T n, void *ud){ MemBuf *m=ud; m->pos=n; return OPJ_TRUE; }
+/* skip/seek MUST clamp — OpenJPEG seeks/skips past EOF on some codestreams (e.g. the
+ * original engine's Kakadu output); an unclamped pos overflows mem_read's avail. */
+static OPJ_OFF_T mem_skip(OPJ_OFF_T n, void *ud){
+    MemBuf *m=ud;
+    if (n < 0){ size_t back=(size_t)(-n); OPJ_OFF_T moved=-(OPJ_OFF_T)(back>m->pos?m->pos:back);
+                m->pos = back>m->pos ? 0 : m->pos-back; return moved; }
+    size_t avail=m->n - m->pos;
+    if ((size_t)n > avail){ m->pos=m->n; return (OPJ_OFF_T)avail; }
+    m->pos += (size_t)n; return n;
+}
+static OPJ_BOOL mem_seek(OPJ_OFF_T n, void *ud){
+    MemBuf *m=ud; if (n<0 || (size_t)n > m->n) return OPJ_FALSE; m->pos=(size_t)n; return OPJ_TRUE;
+}
 static void quiet(const char*msg,void*u){(void)msg;(void)u;}
 
 /* Build the 26-byte IMGCMP wrapper (verified against real engine output). */

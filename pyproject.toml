@@ -1,6 +1,6 @@
 [project]
 name = "qcf-tool"
-version = "1.3.0"
+version = "1.4.0"
 description = "Read/write Choshuku (CAT) .qcf archives on modern systems"
 requires-python = ">=3.10"
 dependencies = [

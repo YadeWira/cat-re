@@ -7,7 +7,7 @@ Deliverables (the C tool runs on Linux **and** Windows):
 
 | Component     | Language | Purpose                                                |
 |---------------|----------|--------------------------------------------------------|
-| `tools/catre.c` | C      | **CAT RE v1.3** — the main archiver (zero-dependency static binary). |
+| `tools/catre.c` | C      | **CAT RE v1.4** — the main archiver (zero-dependency static binary). |
 | `qcf_tool/`   | Python   | Pure-Python reader (all codecs) + DEFLATE writer.       |
 | `libcat/`     | C        | Native port of the algorithms + `cat-tool` CLI.        |
 | `harness/`    | C        | Wine harness to drive the original Windows DLLs.       |
@@ -45,7 +45,7 @@ notes (format layout, codec dispatch table, COM IIDs, etc.).
 
 ## Quick start
 
-### CAT RE v1.3 CLI (recommended)
+### CAT RE v1.4 CLI (recommended)
 
 `catre` is the main archiver — a **native C** tool (links zlib + OpenJPEG statically; no
 original DLLs). It reads real `.qcf` (single/multi/nested folders) and writes DEFLATE +
@@ -144,13 +144,15 @@ project). See the details below.
 
 ## Status & limitations
 
-**Reading** (fully supported, validated against real engine archives):
+**Reading** (validated against real engine archives):
 - Any `.qcf`: single-file, multi-file, and nested folders.
 - DEFLATE members → decompressed losslessly (zlib).
-- Image members → decoded (JPEG2000 via OpenJPEG) and written as PNG.
-- Office/OLE2 members in the **whole-file `MSOC21` variant** (36-byte header + zlib of the
-  whole compound file) → decompressed. The engine's **per-stream** variant for *recognized*
-  Word/Excel docs is not yet read (see below).
+- Image members → decoded (JPEG2000 via OpenJPEG) and written as PNG — **including images the
+  *original engine* produced** (fixed in v1.4; earlier versions wrongly rejected them).
+- Office/OLE2 members in the **whole-file `MSOC21` variant** → decompressed.
+- Members using the engine's **proprietary codecs we can't decode** (per-stream Office,
+  LEAD CMP) are now **listed and identified** by `list`, and `extract` **skips them with a
+  clear message** instead of failing the whole archive (v1.4). See below.
 
 **Writing** (`catre compress`):
 - **DEFLATE** for generic files, with **native nested-folder records** — verified: the
@@ -221,9 +223,9 @@ output size tracks image content like the real engine does. A 628 KB photographi
 ## Project layout
 
 ```
-tools/catre.c            CAT RE v1.3 — native C archiver (main tool; build with `make catre`)
+tools/catre.c            CAT RE v1.4 — native C archiver (main tool; build with `make catre`)
 qcf_tool/                Python reimplementation (same CLI + library)
-  catre.py               CAT RE v1.3 CLI (compress/extract/list/info/test)
+  catre.py               CAT RE v1.4 CLI (compress/extract/list/info/test)
   qcm.py                 REAL QCM parser+encoder (single/multi/folders, validated)
   format.py              low-level 28-byte QCF header primitive
   dispatch.py            backend router
