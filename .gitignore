@@ -10,6 +10,9 @@ CONEXION-IA.md
 # Work-in-progress scratch (Office format-B); not part of the clean tree
 office-todo/
 
+# Proprietary sample archives dropped in for analysis (contain vendor DLLs)
+miliki.qcf
+
 # C build artifacts
 *.o
 *.so
