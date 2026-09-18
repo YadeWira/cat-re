@@ -119,6 +119,9 @@ class QcmMember:
     stream_offset: int          # file offset of the embedded QCF header
     payload_offset: int         # file offset of the compressed payload
     _payload: bytes             # the raw compressed payload bytes
+    inner: bytes = b""          # the member's stored stream (QCF header + ext + payload),
+                                # copied verbatim by `add`/`delete` so that members in a
+                                # codec we cannot decode survive a rewrite untouched
 
     @property
     def codec_name(self) -> str:
@@ -258,49 +261,101 @@ def build_qcm_office(raw: bytes, name: str, dos_datetime: int = 0x5CCA22A4) -> b
     return body + trailing
 
 
-def build_qcm_multi(files: list, dos_datetime: int = 0x5CCA22A4) -> bytes:
+def build_member_stream(name: str, raw: bytes) -> bytes:
+    """One member's stored stream: QCF header + ext byte + deflate payload."""
+    comp = zlib.compress(raw, 9)
+    ext = name.encode("utf-8")[:1]
+    inner = (
+        MAGIC_QCF + b"\x00" * 4 + struct.pack("<I", len(comp)) + b"\x00" * 4
+        + struct.pack("<I", 0x0011001E)
+        + bytes.fromhex("01000400") + bytes([CODEC_DEFLATE, 0x05, 0x04, len(ext)])
+    )
+    assert len(inner) == 0x1C
+    return inner + ext + comp
+
+
+def write_qcm(members: list, dirs=(), dos_datetime: int = 0x5CCA22A4) -> bytes:
+    """Assemble an archive from member streams plus folder records.
+
+    `members` = [{"name", "orig", "dt", "inner"}], where `inner` is the member's
+    stored stream — built from a file, or copied verbatim out of another archive so
+    that a member in a codec we cannot decode survives untouched.
+
+    Folders are real records (type 0x00) with the parent pointers the format uses,
+    not slashes inside a file name: that is how the engine writes them, and it is
+    the only way an EMPTY folder can exist at all. Record order is depth first —
+    a folder's files, then each subfolder followed by its contents — matching the
+    engine's own archives.
+    """
+    out = bytearray(b"QCM\x01\x00\x00\x00\x00")   # QCM header; [+04] patched below
+    stream_offsets = []
+    for i, m in enumerate(members):
+        chunk = m["inner"]
+        if i == 0:
+            stream_offsets.append(len(out) - 4)                  # hdr-4 → 0x04
+            out += chunk
+            struct.pack_into("<I", out, 0x04, len(out) - 4)      # [+04] = end(stream1)-4
+        else:
+            stream_offsets.append(len(out))                      # prefix position = hdr-4
+            out += struct.pack("<I", 4 + len(chunk)) + chunk
+
+    cdir_off = len(out)
+    out += b"\x00" * 9 + struct.pack("<I", dos_datetime) + b"\x00" * 4
+    out += bytes([3, 0, 0]) + b"TOP"
+
+    all_dirs = []
+    def note_dir(d):
+        if d and d not in all_dirs:
+            all_dirs.append(d)
+    for m in members:
+        parts = m["name"].split("/")[:-1]
+        for i in range(len(parts)):
+            note_dir("/".join(parts[:i + 1]))
+    for d in dirs:
+        parts = d.split("/")
+        for i in range(len(parts)):
+            note_dir("/".join(parts[:i + 1]))
+
+    def emit(prefix, parent):
+        for m, so in zip(members, stream_offsets):
+            head, _, base = m["name"].rpartition("/")
+            if head != prefix:
+                continue
+            nm = base.encode("utf-8")
+            out.extend(struct.pack("<II", parent, so) + bytes([2])
+                       + struct.pack("<I", m["dt"]) + struct.pack("<I", m["orig"])
+                       + bytes([len(nm)]) + b"\x00\x00" + nm)
+        for d in all_dirs:
+            head, _, base = d.rpartition("/")
+            if head != prefix:
+                continue
+            myoff = len(out)
+            nm = base.encode("utf-8")
+            out.extend(struct.pack("<II", parent, 0) + bytes([0])
+                       + struct.pack("<I", dos_datetime) + struct.pack("<I", 0)
+                       + bytes([len(nm)]) + b"\x00\x00" + nm)
+            emit(d, myoff)
+
+    emit("", cdir_off)
+    return bytes(out)
+
+
+def build_qcm_multi(files: list, dos_datetime: int = 0x5CCA22A4, dirs=()) -> bytes:
     """Build a multi-file QCM archive (deflate codec). `files` = [(name, raw), ...].
 
     VALIDATED: parses back through QcmArchive.read() and the layout matches the
     real 5-file Choshuku.qcf (stream prefixes, directory records, offsets).
     """
-    out = bytearray(b"QCM\x01\x00\x00\x00\x00")   # QCM header; [+04] patched below
-    stream_offsets = []                            # (hdr-4) per file, for dir records
-    comps = []
-    for i, (name, raw) in enumerate(files):
-        comp = zlib.compress(raw, 9)
-        comps.append(comp)
-        ext = name.encode("utf-8")[:1]
-        inner = (
-            MAGIC_QCF + b"\x00" * 4 + struct.pack("<I", len(comp)) + b"\x00" * 4
-            + struct.pack("<I", 0x0011001E)
-            + bytes.fromhex("01000400") + bytes([CODEC_DEFLATE, 0x05, 0x04, len(ext)])
-        )
-        chunk = inner + ext + comp
-        if i == 0:
-            stream_offsets.append(len(out) - 4)     # hdr-4 → 0x04
-            out += chunk
-            struct.pack_into("<I", out, 0x04, len(out) - 4)  # QCM[+04] = end(stream1)-4
-        else:
-            prefix = 4 + len(chunk)
-            stream_offsets.append(len(out))         # prefix position = hdr-4
-            out += struct.pack("<I", prefix) + chunk
-
-    cdir_off = len(out)
-    out += b"\x00" * 9 + struct.pack("<I", dos_datetime) + b"\x00" * 4
-    out += bytes([3, 0, 0]) + b"TOP"
-    for (name, raw), so in zip(files, stream_offsets):
-        nm = name.encode("utf-8")
-        out += struct.pack("<I", cdir_off) + struct.pack("<I", so) + bytes([2])
-        out += struct.pack("<I", dos_datetime) + struct.pack("<I", len(raw))
-        out += bytes([len(nm)]) + b"\x00\x00" + nm
-    return bytes(out)
+    members = [{"name": name, "orig": len(raw), "dt": dos_datetime,
+                "inner": build_member_stream(name, raw)} for name, raw in files]
+    return write_qcm(members, dirs, dos_datetime)
 
 
 @dataclass
 class QcmArchive:
     cdir_offset: int
     members: list[QcmMember]
+    folders: list = None        # folder records, so an EMPTY folder survives a rewrite
 
     @classmethod
     def is_qcm(cls, data: bytes) -> bool:
@@ -348,12 +403,40 @@ class QcmArchive:
             first = False
         cdir_off = off
 
+        # The stream walk stops at the first member whose packed size the header does
+        # not record (the opaque codecs), so where it stopped is not necessarily the
+        # directory. Trust it only when it landed on the "TOP" record; otherwise find
+        # the last one, exactly as the C reader does.
+        marker = b"\x03\x00\x00TOP"
+        landed = data[cdir_off + 17:cdir_off + 17 + len(marker)] == marker
+        if not landed:
+            found = data.rfind(marker)
+            if found >= 17:
+                cdir_off = found - 17
+
         # --- parse the central directory ("TOP" root + N item records) ---
-        members = cls._parse_directory(data, cdir_off, streams)
-        return cls(cdir_offset=cdir_off, members=members)
+        # When the walk stopped early, the members after the opaque one were never
+        # walked, so their records must be accepted on their own and their header read
+        # at the offset the record points to. Rejecting them (what this reader used to
+        # do) silently dropped every member that followed an undecodable one.
+        members, folders = cls._parse_directory(data, cdir_off, streams, strict=landed)
+
+        # Stream extents: members sit back to back before the directory, so each one
+        # ends where the next begins. That gives an exact length even for codecs whose
+        # header does not record the packed size — and the bytes `add`/`delete` copy.
+        starts = sorted({m.stream_offset for m in members})
+        for m in members:
+            nxt = min((s for s in starts if s > m.stream_offset), default=None)
+            end = (nxt - 4) if nxt is not None and nxt - 4 > m.stream_offset else cdir_off
+            m.inner = data[m.stream_offset:end]
+            if not m.compressed_size:
+                ext = data[m.stream_offset + 0x1B]
+                m.compressed_size = max(0, len(m.inner) - 0x1C - ext)
+                m._payload = data[m.payload_offset:m.payload_offset + m.compressed_size]
+        return cls(cdir_offset=cdir_off, members=members, folders=folders)
 
     @staticmethod
-    def _parse_directory(data: bytes, cdir_off: int, streams: dict) -> list:
+    def _parse_directory(data: bytes, cdir_off: int, streams: dict, strict: bool = True):
         p = cdir_off
         # TOP root entry: 9 zeros + datetime(4) + 4 zeros + [namelen=3][00 00]"TOP"
         try:
@@ -393,7 +476,7 @@ class QcmArchive:
                 name = data[p:p + name_len].decode("utf-8", "replace"); p += name_len
             except (struct.error, IndexError):
                 break
-            if item_type == 0x02 and stream_off not in streams:
+            if strict and item_type == 0x02 and stream_off not in streams:
                 break                                       # not a valid file record
             records[rec_off] = dict(parent=parent_off, stream_off=stream_off,
                                     type=item_type, dt=dt, orig=orig_size, name=name)
@@ -409,15 +492,23 @@ class QcmArchive:
                 cur = records[cur]["parent"]
             return "/".join(reversed(parts))
 
-        members = []
+        members, folders = [], []
         for rec_off in order:
             r = records[rec_off]
             if r["type"] != 0x02:
-                continue                                    # folders carry no payload
-            st = streams[r["stream_off"]]
+                folders.append(full_path(rec_off))          # folders carry no payload
+                continue
+            st = streams.get(r["stream_off"])
+            if st is None:                                  # derive it from the record
+                hdr = r["stream_off"] + 4
+                if hdr + 0x1C > len(data):
+                    continue
+                ext = data[hdr + 0x1B]
+                st = dict(codec=classify_codec(data, hdr), comp_size=0,
+                          payload_off=hdr + 0x1C + ext, hdr=hdr, payload=b"")
             members.append(QcmMember(
                 name=full_path(rec_off), original_size=r["orig"],
                 compressed_size=st["comp_size"], codec=st["codec"], dos_datetime=r["dt"],
                 stream_offset=st["hdr"], payload_offset=st["payload_off"], _payload=st["payload"],
             ))
-        return members
+        return members, folders

@@ -5,7 +5,27 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## v1.9 — 2026-09-18
 
-Deep-testing pass: mutational fuzzing of the reader and the archive-editing paths under
+Deep-testing pass, plus front-end parity: everything the C tool can do to an archive,
+the Python one can do too, and it now writes the format the way the engine does.
+
+### Added (Python front-end)
+- **`add` and `delete`**, with the same guarantee as the C tool: existing members are
+  carried over by copying their stored stream, so a member in a codec this front-end
+  cannot decode survives byte-for-byte (there is a test on an engine-made `office-ps`
+  archive).
+- **Real folder records.** It used to store `sub/dir/file.txt` as a single record name
+  with slashes in it, which is not what the format does — folders are records of their
+  own (type `0x00`) with parent pointers. Empty folders are written and restored too.
+
+### Fixed (Python front-end)
+- **Members after an undecodable one were silently dropped.** The stream walk stops at
+  the first member whose packed size the header does not record, and the reader then
+  rejected every record whose stream it had not walked — so an archive with an opaque
+  Office member plus anything after it listed only the first member. It now falls back
+  the way the C reader does, and derives the packed size from the stream extents (so
+  `list` shows real sizes for opaque members instead of `?`).
+
+Mutational fuzzing of the reader and the archive-editing paths under
 ASan/UBSan, scale and edge-case round-trips, a 600-file corpus round-trip, and leak
 checks on every command. Two real bugs, both fixed.
 

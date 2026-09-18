@@ -20,8 +20,8 @@ import sys
 import time
 
 from .qcm import (
-    QcmArchive, build_qcm_multi, dos_datetime_to_tuple, QcmError, QcmOpaqueCodec,
-    CODEC_IMAGE,
+    QcmArchive, build_qcm_multi, build_member_stream, write_qcm,
+    dos_datetime_to_tuple, QcmError, QcmOpaqueCodec, CODEC_IMAGE,
 )
 
 VERSION = "1.9"
@@ -45,21 +45,27 @@ def _now_dos() -> int:
 
 
 def _gather(inputs):
-    """Expand files/dirs into [(member_name, data)], preserving folder paths."""
-    members = []
+    """Expand files/dirs into ([(member_name, data)], [empty folder names]).
+
+    An empty folder has no file to carry it, so it is collected separately and
+    written as a folder record — the only way the format can express one.
+    """
+    members, empty = [], []
     for inp in inputs:
         if os.path.isdir(inp):
             base = os.path.dirname(inp.rstrip("/")) or "."
-            for root, _dirs, fnames in os.walk(inp):
+            for root, dirs, fnames in os.walk(inp):
                 for fn in sorted(fnames):
                     full = os.path.join(root, fn)
                     rel = os.path.relpath(full, base).replace(os.sep, "/")
                     with open(full, "rb") as f:
                         members.append((rel, f.read()))
+                if not fnames and not dirs:
+                    empty.append(os.path.relpath(root, base).replace(os.sep, "/"))
         else:
             with open(inp, "rb") as f:
                 members.append((os.path.basename(inp), f.read()))
-    return members
+    return members, empty
 
 
 def _fmt_size(n: int) -> str:
@@ -74,10 +80,10 @@ def _fmt_size(n: int) -> str:
 
 # ---------------------------------------------------------------- commands
 def cmd_compress(args):
-    members = _gather(args.inputs)
-    if not members:
+    members, empty = _gather(args.inputs)
+    if not members and not empty:
         sys.exit("catre: no input files")
-    blob = build_qcm_multi(members, dos_datetime=_now_dos())
+    blob = build_qcm_multi(members, dos_datetime=_now_dos(), dirs=empty)
     with open(args.output, "wb") as f:
         f.write(blob)
     total_in = sum(len(d) for _, d in members)
@@ -93,9 +99,67 @@ def cmd_compress(args):
           f"{_fmt_size(total_in)} -> {_fmt_size(len(blob))} ({ratio:.1f}%)")
 
 
+def cmd_add(args):
+    """Add (or replace) members in an existing archive.
+
+    Existing members are carried over by copying their STORED STREAM, so a member in
+    a codec this front-end cannot decode comes through byte-for-byte.
+    """
+    with open(args.archive, "rb") as f:
+        arc = QcmArchive.read(f.read())
+    new, empty = _gather(args.inputs)
+    if not new and not empty:
+        sys.exit("catre: nothing to add")
+    replaced = {name for name, _ in new}
+    dt = _now_dos()
+    members = [{"name": m.name, "orig": m.original_size, "dt": m.dos_datetime,
+                "inner": m.inner}
+               for m in arc.members if m.name not in replaced]
+    for name, data in new:
+        members.append({"name": name, "orig": len(data), "dt": dt,
+                        "inner": build_member_stream(name, data)})
+        if args.verbose:
+            print(f"  + {name}")
+    folders = list(arc.folders or []) + empty
+    blob = write_qcm(members, folders, dt)
+    with open(args.archive, "wb") as f:
+        f.write(blob)
+    print(f"Updated {args.archive}: {len(members)} file(s) total ({_fmt_size(len(blob))})")
+
+
+def cmd_delete(args):
+    """Remove members; naming a folder removes everything under it."""
+    with open(args.archive, "rb") as f:
+        arc = QcmArchive.read(f.read())
+
+    def hit(name):
+        return any(name == t or name.startswith(t + "/") for t in args.members)
+
+    kept, removed = [], 0
+    for m in arc.members:
+        if hit(m.name):
+            removed += 1
+            if args.verbose:
+                print(f"  - {m.name}")
+            continue
+        kept.append({"name": m.name, "orig": m.original_size, "dt": m.dos_datetime,
+                     "inner": m.inner})
+    if not removed:
+        sys.exit("catre: no member matched")
+    folders = [d for d in (arc.folders or []) if not hit(d)]
+    blob = write_qcm(kept, folders, _now_dos())
+    with open(args.archive, "wb") as f:
+        f.write(blob)
+    print(f"Deleted {removed} member(s) from {args.archive}: {len(kept)} left "
+          f"({_fmt_size(len(blob))})")
+
+
 def cmd_extract(args):
     arc = QcmArchive.read(open(args.archive, "rb").read())
     os.makedirs(args.output, exist_ok=True)
+    for d in (arc.folders or []):          # an empty folder exists only as a record
+        if not args.members or any(d == t or d.startswith(t + "/") for t in args.members):
+            os.makedirs(os.path.join(args.output, d), exist_ok=True)
     n = skipped = 0
     for m in arc.members:
         if args.members and m.name not in args.members:
@@ -221,6 +285,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="JPEG2000 image quality — native C `catre` only; ignored by this pure-Python writer")
     c.add_argument("-v", "--verbose", action="store_true", help="list files as they are added")
     c.set_defaults(func=cmd_compress)
+
+    a = sub.add_parser("add", aliases=["a"], help="Add files to an existing .qcf archive")
+    a.add_argument("archive")
+    a.add_argument("inputs", nargs="+", metavar="FILE")
+    a.add_argument("-v", "--verbose", action="store_true")
+    a.set_defaults(func=cmd_add)
+
+    d = sub.add_parser("delete", aliases=["d"], help="Remove members from a .qcf archive")
+    d.add_argument("archive")
+    d.add_argument("members", nargs="+", metavar="NAME")
+    d.add_argument("-v", "--verbose", action="store_true")
+    d.set_defaults(func=cmd_delete)
 
     x = sub.add_parser("extract", aliases=["x"], help="Extract files from a .qcf archive")
     x.add_argument("archive", metavar="ARCHIVE.qcf")
