@@ -116,3 +116,39 @@ def test_empty_folder_survives_a_round_trip(tmp_path):
     assert _run("extract", arc, "-o", str(out), "--no-progress").returncode == 0
     assert (out / "e" / "empty").is_dir(), "the empty folder was dropped"
     assert (out / "e" / "full" / "f.txt").is_file()
+
+
+def test_more_members_than_the_old_fixed_cap(tmp_path):
+    """No silent truncation: the reader used to stop at 4096 members (v1.9).
+
+    Writing 5000 files produced a valid archive from which `list` and `extract`
+    returned only 4095 — 905 files lost with no error at all.
+    """
+    src = tmp_path / "many"
+    src.mkdir()
+    for i in range(4200):
+        (src / f"f{i:05d}.txt").write_text(f"x{i}\n")
+    arc = str(tmp_path / "many.qcf")
+    assert _run("compress", str(src), "-o", arc, "--no-progress").returncode == 0
+    assert len(_names(arc)) == 4200
+
+    out = tmp_path / "out"
+    assert _run("extract", arc, "-o", str(out), "--no-progress").returncode == 0
+    assert len(list((out / "many").iterdir())) == 4200
+
+
+@pytest.mark.parametrize("cut", [8, 40, 100, 0.5, 0.9])
+def test_truncated_archive_is_rejected_not_crashed(tmp_path, cut):
+    """Hostile input must not take the reader out of bounds (found by fuzzing).
+
+    A directory record is 20 bytes before its name; the loop guard said 16 and read
+    past the buffer on a short file.
+    """
+    src = open(os.path.join(FIX, "SampleDoc.doc.qcf"), "rb").read()
+    n = int(len(src) * cut) if isinstance(cut, float) else cut
+    bad = tmp_path / "cut.qcf"
+    bad.write_bytes(src[:n])
+    for cmd in (["list", str(bad), "-v"], ["test", str(bad)], ["info", str(bad)],
+                ["extract", str(bad), "-o", str(tmp_path / "o"), "--no-progress"]):
+        r = _run(*cmd)
+        assert r.returncode in (0, 1, 2), f"{cmd[0]} crashed with {r.returncode}"

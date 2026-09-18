@@ -111,7 +111,7 @@ def run_one(src: str, quality: int) -> dict:
     """Full round of the matrix for one input file. Returns a CSV row."""
     name = os.path.basename(src)
     row = {"file": name, "size": os.path.getsize(src), "ext": os.path.splitext(name)[1].lower(),
-           "engine_codec_bytes": "", "payload_magic": "", "catre_codec": "",
+           "engine_codec_bytes": "", "payload_magic": "", "catre_codec": "", "our_codec": "",
            "engine_compressed": False, "we_decoded": False, "we_byte_exact": False,
            "our_size": 0, "engine_size": 0, "engine_read_ours": False, "note": ""}
 
@@ -163,6 +163,15 @@ def run_one(src: str, quality: int) -> dict:
     our = os.path.join(WINEDIR, "our.qcf")
     if ours.returncode == 0 and os.path.isfile(our):
         row["our_size"] = os.path.getsize(our)
+        # Which codec did WE pick? If it is an image one, our archive is lossy by design,
+        # so comparing the engine's round-trip byte for byte means nothing — the engine
+        # may well have stored that same file with deflate.
+        lst = catre(["list", "our.qcf", "-v", "--no-progress"])
+        for line in lst.stdout.splitlines()[2:]:
+            parts = line.split()
+            if len(parts) >= 4:
+                row["our_codec"] = parts[3]
+                break
         wine(["dec.exe", f"{WINEDIR_WIN}\\our.qcf", f"{WINEDIR_WIN}\\back.out"])
         back = os.path.join(WINEDIR, "back.out")
         if os.path.isfile(back):
@@ -191,9 +200,12 @@ def summarize(rows: list[dict]) -> None:
             print(f"{codec:<26} {n:>5} {dec:>6}  {'n/a (lossy)':>11}  {'n/a (lossy)':>20}")
             continue
         exact = sum(1 for r in rs if r["we_byte_exact"])
-        back = sum(1 for r in rs if r["engine_read_ours"])
-        print(f"{codec:<26} {n:>5} {dec:>6}  {exact:>11}  {back:>20}")
-    lossless = [r for r in rows if r["catre_codec"] not in IMAGE_CODECS]
+        comparable = [r for r in rs if r.get("our_codec", "") not in IMAGE_CODECS]
+        back = sum(1 for r in comparable if r["engine_read_ours"])
+        shown = str(back) if len(comparable) == n else f"{back}/{len(comparable)}"
+        print(f"{codec:<26} {n:>5} {dec:>6}  {exact:>11}  {shown:>20}")
+    lossless = [r for r in rows if r["catre_codec"] not in IMAGE_CODECS
+                and r.get("our_codec", "") not in IMAGE_CODECS]
     n = len(rows)
     eng_ok = sum(1 for r in rows if r["engine_compressed"])
     print("-" * 76)

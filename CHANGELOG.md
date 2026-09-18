@@ -3,6 +3,35 @@
 All notable changes to **CAT RE** (the native `catre` archiver). Dates are UTC.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.9 — 2026-09-18
+
+Deep-testing pass: mutational fuzzing of the reader and the archive-editing paths under
+ASan/UBSan, scale and edge-case round-trips, a 600-file corpus round-trip, and leak
+checks on every command. Two real bugs, both fixed.
+
+### Fixed
+- **Out-of-bounds read on a truncated archive.** A central-directory record is 20 bytes
+  before its name; the loop guard said 16 and read past the buffer. Found by fuzzing;
+  members whose payload falls outside the file are now dropped and an over-long packed
+  size is clamped, so a corrupted header cannot send a decoder off the end either.
+- **Silent data loss past 4096 members.** The reader's arrays were fixed at `MAXMEM`, so
+  an archive with 5000 files listed and extracted **4095 of them without any error**.
+  The member, stream, record and folder tables all grow on demand now; 5000 files
+  round-trip byte-exact (there is a test at 4200).
+- Memory leaks in `compress`, `extract`, `add` and `delete`, including the error paths
+  an invalid archive takes. Every command is clean under LeakSanitizer.
+
+### Changed
+- `scripts/engine_matrix.py` records the codec **we** chose as well: when our side goes
+  lossy (an image) the engine's round-trip cannot be compared byte for byte, and those
+  rows no longer count as failures.
+
+### Checked, no change needed
+0-byte files, 1-byte files, names with spaces, UTF-8 and emoji, dot-files, no extension,
+double extensions, 20-level nesting, duplicate basenames in different folders — all
+round-trip through `catre` **and** through the original engine. A 255-character name is
+the format's limit (1-byte length field) and also the filesystem's, so they agree.
+
 ## v1.8 — 2026-09-18
 
 Feature parity with the original product's archive operations. The remaining gaps were

@@ -1,4 +1,4 @@
-/* CAT RE v1.8 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.9 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.8"
+#define VERSION "1.9"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0
@@ -109,15 +109,15 @@ typedef struct {
 
 /* Folder records (type 0x00) carry no stream. They are the only way an EMPTY folder
  * exists in the archive, so they have to be carried across a rewrite. */
-/* 4 MB of names: every instance is `static`, never a local. A DirList on the stack
- * overflows Windows' 1 MB default (and ASan caught it on Linux too) — the same trap
- * the MAXMEM arrays already avoid. */
-#define MAXDIRS 4096
-typedef struct { char name[MAXDIRS][1024]; int n; } DirList;
+/* Folder paths, grown on demand. Nothing here has a fixed ceiling: a cap that silently
+ * drops entries is how an archiver loses your files. */
+typedef struct { char (*name)[1024]; int n, cap; } DirList;
+static void dirs_free(DirList *d){ if(d){ free(d->name); d->name=NULL; d->n=d->cap=0; } }
 static void dirs_add(DirList *d, const char *name){
     if (!d || !*name) return;
     for (int i=0;i<d->n;i++) if (!strcmp(d->name[i],name)) return;
-    if (d->n<MAXDIRS){ strncpy(d->name[d->n],name,sizeof d->name[0]-1); d->name[d->n][sizeof d->name[0]-1]=0; d->n++; }
+    if (d->n==d->cap){ d->cap=d->cap?d->cap*2:64; d->name=realloc(d->name,(size_t)d->cap*1024); }
+    strncpy(d->name[d->n],name,1023); d->name[d->n][1023]=0; d->n++;
 }
 
 static uint8_t *read_file(const char *path, size_t *len){
@@ -155,16 +155,18 @@ static int classify_codec(const uint8_t *d, size_t len, size_t qcf){
     return CODEC_DEFLATE;
 }
 
-/* parse a QCM container; returns member count, fills mem[] (caps at MAXMEM).
+/* parse a QCM container; returns the member count and allocates *mem_out (free it).
  * Robust: if the stream walk can't locate the central directory (e.g. members use
  * the engine's proprietary per-stream office / LEAD codecs, or an image whose `comp`
  * is the codestream size only), it falls back to scanning for the "TOP" directory
  * record so the archive can still be LISTED and the decodable members extracted. */
-static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_t *cdir_out,
+static int qcm_read_ex(const uint8_t *d, size_t len, Member **mem_out, uint32_t *cdir_out,
                        DirList *dirs_out){
+    if (mem_out) *mem_out=NULL;
     if (len<0x24 || rd32(d)!=MAGIC_QCM) return -1;
     /* walk streams: stream1 @ +0x08 (no prefix); others have a 4-byte size prefix */
-    static struct { uint32_t so, hdr, comp, payoff, codec; } st[MAXMEM]; int ns=0;
+    struct Stream { uint32_t so, hdr, comp, payoff, codec; };
+    struct Stream *st=NULL; int ns=0, stcap=0;
     size_t off=8; int first=1;
     while (off+0x1c<=len){
         size_t hdr = first?off:off+4;
@@ -175,8 +177,9 @@ static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint
         if (codec==CODEC_OLE2 && comp==0 && payoff+12<=len){
             comp = 36 + rd32(d+payoff+8);   /* MSOC21 office whole-file: 36B header + zlib(whole OLE2) */
         }
-        if (ns<MAXMEM){ st[ns].so=hdr-4; st[ns].hdr=hdr; st[ns].comp=comp;
-                        st[ns].payoff=payoff; st[ns].codec=codec; ns++; }
+        if (ns==stcap){ stcap=stcap?stcap*2:64; st=realloc(st,(size_t)stcap*sizeof *st); }
+        st[ns].so=hdr-4; st[ns].hdr=hdr; st[ns].comp=comp;
+        st[ns].payoff=payoff; st[ns].codec=codec; ns++;
         off=payoff+comp; first=0;
     }
     /* central directory: trust the walk if it landed on the "TOP" record... */
@@ -188,16 +191,21 @@ static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint
         long found=-1;
         for (size_t i=0; i+6<=len; i++)
             if (d[i]==3 && d[i+1]==0 && d[i+2]==0 && !memcmp(d+i+3,"TOP",3)) found=(long)i;
-        if (found<17) return -1;
+        if (found<17){ free(st); return -1; }
         cdir=(size_t)found-17; strict=0;
     }
     if(cdir_out)*cdir_out=cdir;
-    size_t p=cdir+9+4+4; if (p+3>len) return -1; uint8_t tl=d[p]; p+=3;
-    if (memcmp(d+p,"TOP",3)!=0) return -1;
+    size_t p=cdir+9+4+4; if (p+3>len){ free(st); return -1; } uint8_t tl=d[p]; p+=3;
+    if (p+3>len || memcmp(d+p,"TOP",3)!=0){ free(st); return -1; }
     p+=tl;
     /* collect records (offset, parent, stream_off, type, orig, dt, name) */
-    static struct { uint32_t off,parent,so,type,orig,dt; char name[256]; } rec[MAXMEM]; int nr=0;
-    while (p+16<=len && nr<MAXMEM){
+    struct Rec { uint32_t off,parent,so,type,orig,dt; char name[256]; };
+    struct Rec *rec=NULL; int nr=0, reccap=0;
+    /* a record is 20 bytes (parent, stream_off, type, datetime, orig, namelen, pad)
+     * before the name — the guard used to say 16 and read past the buffer on a
+     * truncated archive (found by fuzzing). */
+    while (p+20<=len){
+        if (nr==reccap){ reccap=reccap?reccap*2:64; rec=realloc(rec,(size_t)reccap*sizeof *rec); }
         uint32_t roff=p;
         uint32_t parent=rd32(d+p); p+=4;
         uint32_t so=rd32(d+p); p+=4;
@@ -215,6 +223,8 @@ static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint
         p+=nl; nr++;
     }
     /* resolve full paths (follow parent pointers up to TOP=cdir) and emit files */
+    int nfiles=0; for (int i=0;i<nr;i++) if (rec[i].type==0x02) nfiles++;
+    Member *mem = calloc(nfiles?nfiles:1,sizeof(Member));
     int m=0;
     for (int i=0;i<nr;i++){                      /* folders first: needed to keep empty ones */
         if (rec[i].type==0x02 || !dirs_out) continue;
@@ -230,7 +240,7 @@ static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint
         }
         dirs_add(dirs_out,path);
     }
-    for (int i=0;i<nr && m<maxm;i++){
+    for (int i=0;i<nr && m<nfiles;i++){
         if (rec[i].type!=0x02) continue;
         char path[1024]={0}; char tmp[1024];
         uint32_t cur=rec[i].off; int guard=0;
@@ -257,6 +267,17 @@ static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint
         }
         m++;
     }
+    /* drop members whose payload lies outside the file, and clamp a packed size that
+     * claims more bytes than there are: a corrupted header must not send the decoders
+     * reading past the buffer. */
+    int valid=0;
+    for (int i=0;i<m;i++){
+        if (mem[i].hdr+0x1c>len || mem[i].payoff>len) continue;
+        if ((size_t)mem[i].payoff+mem[i].comp>len) mem[i].comp=(uint32_t)(len-mem[i].payoff);
+        if (valid!=i) mem[valid]=mem[i];
+        valid++;
+    }
+    m=valid;
     /* stream extents: members sit back to back before the directory, so each one ends
      * where the next begins. That gives an exact length even for codecs whose header
      * does not record the packed size. */
@@ -275,11 +296,13 @@ static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint
             if (mem[i].inner_len > 0x1c+ext) mem[i].comp = mem[i].inner_len - 0x1c - ext;
         }
     }
+    free(st); free(rec);
+    if (mem_out) *mem_out=mem; else free(mem);
     return m;
 }
 
-static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_t *cdir_out){
-    return qcm_read_ex(d,len,mem,maxm,cdir_out,NULL);
+static int qcm_read(const uint8_t *d, size_t len, Member **mem_out, uint32_t *cdir_out){
+    return qcm_read_ex(d,len,mem_out,cdir_out,NULL);
 }
 
 /* Does a zlib stream start here? CMF=0x78 (deflate, 32K window) and the FCHECK
@@ -444,7 +467,7 @@ static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
      * returns E_INVALIDARG on an archive with no file at the ROOT, whatever wrote it,
      * because there is no single file for it to extract. Folder archives are the
      * shell's job in the original product.) */
-    static DirList all; all.n=0;
+    DirList all={0};
     for (int i=0;i<n;i++){                       /* every prefix of every member path */
         char *nm=m[i].name;
         for (char *s2=nm; *s2; s2++) if (*s2=='/'){
@@ -462,9 +485,9 @@ static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
 
     /* iterative depth-first walk over (prefix, parent record offset) */
     typedef struct { char prefix[1024]; uint32_t parent; } Frame;
-    static Frame stack[MAXDIRS]; int sp=0;
-    static int dir_done[MAXDIRS];
-    for (int i=0;i<all.n;i++) dir_done[i]=0;
+    Frame *stack=calloc((size_t)all.n+1,sizeof(Frame)); int sp=0;
+    int *dir_done=calloc(all.n?all.n:1,sizeof(int));
+    int *children=calloc(all.n?all.n:1,sizeof(int));
     stack[sp].prefix[0]=0; stack[sp].parent=cdir; sp++;
     while (sp>0){
         Frame fr=stack[--sp];
@@ -483,14 +506,14 @@ static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
             bput(&out_b,bn,nl);
         }
         /* subfolders of this folder, deepest pushed last so they come out in order */
-        int children[MAXDIRS]; int nc=0;
+        int nc=0;
         for (int i=0;i<all.n;i++){
             if (dir_done[i]) continue;
             const char *dn=all.name[i];
             const char *ls=strrchr(dn,'/');
             int in_here = plen ? (!strncmp(dn,fr.prefix,plen) && dn[plen]=='/' && ls==dn+plen)
                                : (ls==NULL);
-            if (in_here && nc<MAXDIRS) children[nc++]=i;
+            if (in_here) children[nc++]=i;
         }
         for (int c=nc-1;c>=0;c--){
             int i=children[c]; dir_done[i]=1;
@@ -500,11 +523,12 @@ static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
             bu32(&out_b,fr.parent); bu32(&out_b,0); bu8(&out_b,0); bu32(&out_b,dt);  /* type=0 */
             bu32(&out_b,0); size_t nl=strlen(bn); bu8(&out_b,(uint8_t)nl); bu8(&out_b,0); bu8(&out_b,0);
             bput(&out_b,bn,nl);
-            if (sp<MAXDIRS){ strncpy(stack[sp].prefix,dn,sizeof stack[sp].prefix-1);
-                             stack[sp].prefix[sizeof stack[sp].prefix-1]=0;
-                             stack[sp].parent=myoff; sp++; }
+            strncpy(stack[sp].prefix,dn,sizeof stack[sp].prefix-1);
+            stack[sp].prefix[sizeof stack[sp].prefix-1]=0;
+            stack[sp].parent=myoff; sp++;
         }
     }
+    free(stack); free(dir_done); free(children); dirs_free(&all);
     FILE *f=fopen(out,"wb");
     if(!f){ bar_clear(); perror("open out"); free(so); free(out_b.p); return -1; }
     fwrite(out_b.p,1,out_b.n,f); fclose(f);
@@ -516,7 +540,7 @@ static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
 static int cmd_compress(int argc, char **argv){
     const char *out=NULL; int q=100, verbose=0;
     InFile *files=NULL; int nf=0, cap=0;
-    static DirList dirs; dirs.n=0;
+    DirList dirs={0};
     for (int i=0;i<argc;i++){
         if (!strcmp(argv[i],"-o")||!strcmp(argv[i],"--output")) out=argv[++i];
         else if (!strcmp(argv[i],"-q")||!strcmp(argv[i],"--quality")) q=atoi(argv[++i]);
@@ -563,8 +587,8 @@ static int cmd_compress(int argc, char **argv){
     }
     bar("Compressing", total_in, total_in, nf, nf, "done");
     int written=write_qcm(out,om,nf,&dirs);
-    for (int i=0;i<nf;i++) free(om[i].owned);
-    free(om);
+    for (int i=0;i<nf;i++){ free(om[i].owned); free(files[i].name); free(files[i].data); }
+    free(om); free(files); dirs_free(&dirs);
     bar_clear();
     if (written<0) return 1;
     double dt_s=now_sec()-t0, ratio=total_in?100.0*written/total_in:0;
@@ -582,7 +606,7 @@ static int cmd_compress(int argc, char **argv){
 static int cmd_add(int argc, char **argv){
     const char *arc=NULL; int q=100, verbose=0;
     InFile *files=NULL; int nf=0, cap=0;
-    static DirList newdirs; newdirs.n=0;
+    DirList newdirs={0};
     for (int i=0;i<argc;i++){
         if (!strcmp(argv[i],"-q")||!strcmp(argv[i],"--quality")) q=atoi(argv[++i]);
         else if (!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) verbose=1;
@@ -608,11 +632,18 @@ static int cmd_add(int argc, char **argv){
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     if(!nf && !newdirs.n){ fprintf(stderr,"catre: nothing to add\n"); return 2; }
 
-    size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    static Member mem[MAXMEM]; static DirList olddirs;
-    olddirs.n=0;
-    int n=qcm_read_ex(d,len,mem,MAXMEM,NULL,&olddirs);
-    if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); free(d); return 1; }
+    size_t len; uint8_t *d=read_file(arc,&len);
+    if(!d){ perror(arc); goto fail_inputs; }
+    Member *mem=NULL; DirList olddirs={0};
+    int n=qcm_read_ex(d,len,&mem,NULL,&olddirs);
+    if(n<0){
+        fprintf(stderr,"catre: not a valid .qcf\n");
+        free(mem); free(d); dirs_free(&olddirs);
+    fail_inputs:                                  /* the gathered files are ours to free */
+        for (int i=0;i<nf;i++){ free(files[i].name); free(files[i].data); }
+        free(files); dirs_free(&newdirs);
+        return 1;
+    }
 
     OutMember *om=calloc(n+nf,sizeof(OutMember)); int on=0;
     for (int i=0;i<n;i++){                       /* keep, unless the name is replaced */
@@ -639,7 +670,8 @@ static int cmd_add(int argc, char **argv){
     for (int i=0;i<newdirs.n;i++) dirs_add(&olddirs,newdirs.name[i]);
     int written=write_qcm(arc,om,on,&olddirs);
     for (int i=0;i<on;i++) free(om[i].owned);
-    free(om); free(d);
+    for (int i=0;i<nf;i++){ free(files[i].name); free(files[i].data); }
+    free(files); free(om); free(mem); free(d); dirs_free(&olddirs); dirs_free(&newdirs);
     bar_clear();
     if (written<0) return 1;
     char a[16];
@@ -648,18 +680,22 @@ static int cmd_add(int argc, char **argv){
 }
 
 static int cmd_delete(int argc, char **argv){
-    const char *arc=NULL; int verbose=0; const char *names[MAXMEM]; int nn=0;
+    const char *arc=NULL; int verbose=0;
+    const char **names=calloc(argc?argc:1,sizeof(char*)); int nn=0;
     for (int i=0;i<argc;i++){
         if (!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) verbose=1;
         else if (!strcmp(argv[i],"--no-progress")||!strcmp(argv[i],"-p")||!strcmp(argv[i],"--progress")) {}
         else if (!arc) arc=argv[i];
-        else if (nn<MAXMEM) names[nn++]=argv[i];
+        else names[nn++]=argv[i];
     }
-    if(!arc || !nn){ fprintf(stderr,"catre: usage: catre delete <archive> <member>...\n"); return 2; }
-    size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    static Member mem[MAXMEM]; static DirList dirs; dirs.n=0;
-    int n=qcm_read_ex(d,len,mem,MAXMEM,NULL,&dirs);
-    if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); free(d); return 1; }
+    if(!arc || !nn){ fprintf(stderr,"catre: usage: catre delete <archive> <member>...\n");
+                     free(names); return 2; }
+    size_t len; uint8_t *d=read_file(arc,&len);
+    if(!d){ perror(arc); free(names); return 1; }
+    Member *mem=NULL; DirList dirs={0};
+    int n=qcm_read_ex(d,len,&mem,NULL,&dirs);
+    if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n");
+             free(mem); free(d); free(names); dirs_free(&dirs); return 1; }
 
     OutMember *om=calloc(n?n:1,sizeof(OutMember)); int on=0, removed=0;
     for (int i=0;i<n;i++){
@@ -676,7 +712,8 @@ static int cmd_delete(int argc, char **argv){
         om[on].inner=d+mem[i].inner_off; om[on].inner_len=mem[i].inner_len;
         on++;
     }
-    if (!removed){ fprintf(stderr,"catre: no member matched\n"); free(om); free(d); return 1; }
+    if (!removed){ fprintf(stderr,"catre: no member matched\n");
+                   free(om); free(mem); free(d); free(names); dirs_free(&dirs); return 1; }
     /* a folder the user deleted should not come back through the folder records */
     static DirList keep; keep.n=0;
     for (int i=0;i<dirs.n;i++){
@@ -689,7 +726,7 @@ static int cmd_delete(int argc, char **argv){
         if (!drop) dirs_add(&keep,dirs.name[i]);
     }
     int written=write_qcm(arc,om,on,&keep);
-    free(om); free(d);
+    free(om); free(mem); free(d); free(names); dirs_free(&dirs); dirs_free(&keep);
     if (written<0) return 1;
     char a[16];
     printf("Deleted %d member(s) from %s: %d left (%s)\n", removed, arc, on,
@@ -705,21 +742,21 @@ static void mkdirs(const char *path){
 
 static int cmd_extract(int argc, char **argv){
     const char *arc=NULL,*out="."; int verbose=0;
-    const char *want[MAXMEM]; int nwant=0;          /* -m: extract only these members */
+    const char **want=calloc(argc?argc:1,sizeof(char*)); int nwant=0;   /* -m: chosen members */
     for (int i=0;i<argc;i++){
         if (!strcmp(argv[i],"-o")||!strcmp(argv[i],"--output")) out=argv[++i];
         else if (!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) verbose=1;
         else if (!strcmp(argv[i],"--no-progress")) g_progress=0;
         else if (!strcmp(argv[i],"-p")||!strcmp(argv[i],"--progress")) g_progress=2;
         else if (!strcmp(argv[i],"-m")||!strcmp(argv[i],"--members")){
-            while (i+1<argc && argv[i+1][0]!='-' && nwant<MAXMEM) want[nwant++]=argv[++i];
+            while (i+1<argc && argv[i+1][0]!='-') want[nwant++]=argv[++i];
         }
         else arc=argv[i];
     }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    static Member mem[MAXMEM]; static DirList dirs; dirs.n=0;
-    int n=qcm_read_ex(d,len,mem,MAXMEM,NULL,&dirs);
+    Member *mem=NULL; DirList dirs={0};
+    int n=qcm_read_ex(d,len,&mem,NULL,&dirs);
     if (n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); return 1; }
     mkdir(out,0755);
     /* recreate folder records first — an EMPTY folder exists only as a record, so
@@ -818,6 +855,7 @@ static int cmd_extract(int argc, char **argv){
         free(data);
     }
     bar("Extracting", total_out, total_out, n, n, "done");
+    dirs_free(&dirs); free(mem); free((void*)want);
     bar_clear();
     double dt_s=now_sec()-t0; char a[16],sp[16];
     printf("Extracted %d file(s) to %s/ (%s, %.2fs, %s/s)%s\n", done, out,
@@ -843,7 +881,7 @@ static int cmd_list(int argc, char **argv){
     }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    static Member mem[MAXMEM]; int n=qcm_read(d,len,mem,MAXMEM,NULL);
+    Member *mem=NULL; int n=qcm_read(d,len,&mem,NULL);
     if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); return 1; }
     printf("Archive: %s  (%d file(s))\n",arc,n);
     if (verbose) printf("%11s %11s %7s  %-9s %-19s name\n","size","packed","ratio","codec","modified");
@@ -858,7 +896,7 @@ static int cmd_list(int argc, char **argv){
             }
         } else printf("  %s\n",mem[i].name);
     }
-    free(d); return 0;
+    free(mem); free(d); return 0;
 }
 
 static int cmd_info(int argc, char **argv){
@@ -870,7 +908,7 @@ static int cmd_info(int argc, char **argv){
     }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    uint32_t cdir; static Member mem[MAXMEM]; int n=qcm_read(d,len,mem,MAXMEM,&cdir);
+    uint32_t cdir; Member *mem=NULL; int n=qcm_read(d,len,&mem,&cdir);
     if(n<0){ printf("%s: not a QCM/.qcf container\n",arc); free(d); return 1; }
     size_t total=0; for(int i=0;i<n;i++) total+=mem[i].orig;
     printf("file:           %s\n",arc);
@@ -880,7 +918,7 @@ static int cmd_info(int argc, char **argv){
     printf("central dir @:  0x%x\n",cdir);
     printf("uncompressed:   %zu bytes\n",total);
     printf("overall ratio:  %.1f%%\n",total?100.0*len/total:0);
-    free(d); return 0;
+    free(mem); free(d); return 0;
 }
 
 static int cmd_test(int argc, char **argv){
@@ -888,7 +926,7 @@ static int cmd_test(int argc, char **argv){
     for(int i=0;i<argc;i++){ if(!strcmp(argv[i],"-v"))verbose=1; else arc=argv[i]; }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    static Member mem[MAXMEM]; int n=qcm_read(d,len,mem,MAXMEM,NULL);
+    Member *mem=NULL; int n=qcm_read(d,len,&mem,NULL);
     if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); return 1; }
     int ok=0,bad=0,skip=0;
     for(int i=0;i<n;i++){
@@ -918,7 +956,7 @@ static int cmd_test(int argc, char **argv){
     }
     if (skip) printf("Tested %d member(s): %d OK, %d failed, %d skipped (proprietary).\n",ok+bad+skip,ok,bad,skip);
     else      printf("Tested %d member(s): %d OK, %d failed.\n",ok+bad,ok,bad);
-    free(d); return bad?1:0;
+    free(mem); free(d); return bad?1:0;
 }
 
 static void banner(void){

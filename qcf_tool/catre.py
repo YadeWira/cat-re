@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CAT RE v1.8 — pure-Python CLI for Choshuku/CAT `.qcf` files.
+"""CAT RE v1.9 — pure-Python CLI for Choshuku/CAT `.qcf` files.
 
 A free, reverse-engineered reimplementation of the Choshuku Professional
 (超圧縮 / QuikCAT CAT) `.qcf` container, with no dependency on the original
@@ -24,7 +24,7 @@ from .qcm import (
     CODEC_IMAGE,
 )
 
-VERSION = "1.8"
+VERSION = "1.9"
 BANNER = r"""
   ____    _    _____   ____  _____
  / ___|  / \  |_   _| |  _ \| ____|   CAT RE v%s
