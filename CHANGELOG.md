@@ -3,6 +3,38 @@
 All notable changes to **CAT RE** (the native `catre` archiver). Dates are UTC.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.8 — 2026-09-18
+
+Feature parity with the original product's archive operations. The remaining gaps were
+never about codecs: the 2003 software could add files to an existing `.qcf` and delete
+members from one, and we could only create archives from scratch.
+
+### Added
+- **`catre add ARCHIVE FILE|DIR...`** — add (or replace) members in an existing archive.
+- **`catre delete ARCHIVE MEMBER...`** — remove members; naming a folder removes its
+  contents.
+- **`catre extract -m NAME...`** — extract only the named members (a folder name takes
+  its contents). The Python front-end already had this.
+- **Empty folders survive a round-trip.** They exist only as folder records, so the
+  writer now emits one for a directory with no files, and `extract` recreates folder
+  records instead of waiting for a file to `mkdir` its parents.
+
+Both `add` and `delete` rewrite the archive **from the stored streams**, never from
+decoded data: a member in a codec we cannot decode (per-stream Office, LEAD images, the
+engine's structural PDF) comes out byte-for-byte identical. There is a test for exactly
+that.
+
+### Changed
+- Directory records are emitted depth first — a folder's files, then each subfolder
+  followed by its contents — which is how the engine's own archives are laid out.
+- `list` now derives the packed size of members whose header does not record it (the
+  opaque codecs), by measuring the distance to the next stream, instead of printing `?`.
+
+### Verified
+The original engine still reads what we write after an `add` (including an archive whose
+other member is one it compressed itself), and an opaque member's bytes are unchanged
+across the rewrite. Suite is 53 tests.
+
 ## v1.7 — 2026-09-18
 
 Driven by a new conformance harness (`scripts/engine_matrix.py`) that runs the original

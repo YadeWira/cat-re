@@ -32,14 +32,18 @@ bit from release assets. Building it yourself:
 ```bash
 catre compress file.txt mydir/ -o out.qcf      # files & folders (native folder records)
 catre compress photo.png -o out.qcf -q 50      # images → JPEG2000 lossy (quality 0-100)
+catre add out.qcf more.txt                     # add to an existing archive
+catre delete out.qcf file.txt                  # remove members (a folder takes its contents)
 catre list out.qcf -v                          # sizes, ratio, codec, date
-catre extract out.qcf -o ./restored/           # folders restored; images decoded to PNG
+catre extract out.qcf -o ./restored/ -m file.txt   # all of it, or only what you name
 catre info out.qcf                             # container + codec details
 catre test out.qcf                             # decode every member and verify it
 ```
 
-Commands mirror the original software (`compress`/`c`, `extract`/`x`, `list`/`l`, `info`/`i`,
-`test`/`t`). `-q` sets the JPEG2000 **target PSNR**, calibrated to the original engine;
+Commands mirror the original software (`compress`/`c`, `add`/`a`, `delete`/`d`,
+`extract`/`x`, `list`/`l`, `info`/`i`, `test`/`t`). `add` and `delete` rewrite the archive
+from the stored streams, so members in codecs only the original engine can decode come
+through byte-for-byte. `-q` sets the JPEG2000 **target PSNR**, calibrated to the original engine;
 `--store` forces lossless DEFLATE for files you need bit-exact. Every flag, the Python
 front-end and the caveats:
 **[Quick Start](https://github.com/YadeWira/cat-re/wiki/Quick-Start)**.
@@ -71,7 +75,7 @@ qcf_tool/                 Python reimplementation: reads every codec, writes DEF
 libcat/, tools/cat-tool.c older C library and CLI, kept for reference
 harness/                  Wine/MinGW harnesses that drive the original DLLs
 scripts/engine_matrix.py  conformance harness: original engine vs catre, file by file
-tests/                    pytest suite (48) + real engine-made fixtures
+tests/                    pytest suite (53) + real engine-made fixtures
 docs/                     the specification of record — QCF_FORMAT_SPEC.md, RE_verified.md
 ```
 

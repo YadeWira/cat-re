@@ -1,4 +1,4 @@
-/* CAT RE v1.7 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.8 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.7"
+#define VERSION "1.8"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0
@@ -100,7 +100,25 @@ static void bu32(Buf*b,uint32_t v){ uint8_t t[4]; wr32(t,v); bput(b,t,4); }
 typedef struct {
     char name[1024];        /* full path */
     uint32_t orig, comp, codec, dt, payoff, hdr;
+    /* The member's stream as stored: QCF header + ext header + payload, without the
+     * 4-byte chunk prefix. Copying these bytes verbatim is how `add` and `delete`
+     * rewrite an archive without having to decode (or even understand) a member —
+     * the engine's proprietary codecs survive the operation untouched. */
+    uint32_t inner_off, inner_len;
 } Member;
+
+/* Folder records (type 0x00) carry no stream. They are the only way an EMPTY folder
+ * exists in the archive, so they have to be carried across a rewrite. */
+/* 4 MB of names: every instance is `static`, never a local. A DirList on the stack
+ * overflows Windows' 1 MB default (and ASan caught it on Linux too) — the same trap
+ * the MAXMEM arrays already avoid. */
+#define MAXDIRS 4096
+typedef struct { char name[MAXDIRS][1024]; int n; } DirList;
+static void dirs_add(DirList *d, const char *name){
+    if (!d || !*name) return;
+    for (int i=0;i<d->n;i++) if (!strcmp(d->name[i],name)) return;
+    if (d->n<MAXDIRS){ strncpy(d->name[d->n],name,sizeof d->name[0]-1); d->name[d->n][sizeof d->name[0]-1]=0; d->n++; }
+}
 
 static uint8_t *read_file(const char *path, size_t *len){
     FILE *f=fopen(path,"rb"); if(!f) return NULL;
@@ -142,7 +160,8 @@ static int classify_codec(const uint8_t *d, size_t len, size_t qcf){
  * the engine's proprietary per-stream office / LEAD codecs, or an image whose `comp`
  * is the codestream size only), it falls back to scanning for the "TOP" directory
  * record so the archive can still be LISTED and the decodable members extracted. */
-static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_t *cdir_out){
+static int qcm_read_ex(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_t *cdir_out,
+                       DirList *dirs_out){
     if (len<0x24 || rd32(d)!=MAGIC_QCM) return -1;
     /* walk streams: stream1 @ +0x08 (no prefix); others have a 4-byte size prefix */
     static struct { uint32_t so, hdr, comp, payoff, codec; } st[MAXMEM]; int ns=0;
@@ -197,6 +216,20 @@ static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_
     }
     /* resolve full paths (follow parent pointers up to TOP=cdir) and emit files */
     int m=0;
+    for (int i=0;i<nr;i++){                      /* folders first: needed to keep empty ones */
+        if (rec[i].type==0x02 || !dirs_out) continue;
+        char path[1024]={0}; char tmp[1024];
+        uint32_t cur=rec[i].off; int guard=0;
+        while (guard++<64){
+            int idx=-1; for(int j=0;j<nr;j++) if(rec[j].off==cur){idx=j;break;}
+            if (idx<0) break;
+            if (path[0]) { snprintf(tmp,sizeof tmp,"%s/%s",rec[idx].name,path); strcpy(path,tmp); }
+            else strncpy(path,rec[idx].name,sizeof path-1);
+            if (rec[idx].parent==cdir || rec[idx].parent==rec[idx].off) break;
+            cur=rec[idx].parent;
+        }
+        dirs_add(dirs_out,path);
+    }
     for (int i=0;i<nr && m<maxm;i++){
         if (rec[i].type!=0x02) continue;
         char path[1024]={0}; char tmp[1024];
@@ -224,7 +257,29 @@ static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_
         }
         m++;
     }
+    /* stream extents: members sit back to back before the directory, so each one ends
+     * where the next begins. That gives an exact length even for codecs whose header
+     * does not record the packed size. */
+    for (int i=0;i<m;i++){
+        uint32_t start = mem[i].hdr;                 /* inner bytes start at the QCF header */
+        uint32_t end = (uint32_t)cdir;
+        for (int j=0;j<m;j++){
+            uint32_t other = mem[j].hdr;             /* the next stream's prefix, if any */
+            uint32_t other_start = (other>=4 && mem[j].hdr-4>=8) ? other-4 : other;
+            if (other_start>start && other_start<end) end=other_start;
+        }
+        mem[i].inner_off = start;
+        mem[i].inner_len = (end>start) ? end-start : 0;
+        if (!mem[i].comp && mem[i].inner_len > 0x1c){   /* opaque codec: derive packed size */
+            uint32_t ext = d[start+0x1b];
+            if (mem[i].inner_len > 0x1c+ext) mem[i].comp = mem[i].inner_len - 0x1c - ext;
+        }
+    }
     return m;
+}
+
+static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_t *cdir_out){
+    return qcm_read_ex(d,len,mem,maxm,cdir_out,NULL);
 }
 
 /* Does a zlib stream start here? CMF=0x78 (deflate, 32K window) and the FCHECK
@@ -273,16 +328,24 @@ static void dos_str(uint32_t dt, char *out){
 /* ---------- compress: gather files (recurse dirs), build QCM ---------- */
 typedef struct { char *name; uint8_t *data; size_t len; } InFile;
 
-static void gather(const char *path, const char *base, InFile **list, int *n, int *cap){
+static void gather(const char *path, const char *base, InFile **list, int *n, int *cap,
+                   DirList *dirs){
     struct stat sb; if (stat(path,&sb)!=0) return;
     if (S_ISDIR(sb.st_mode)){
+        int before=*n;
         DIR *dp=opendir(path); if(!dp) return; struct dirent *e;
         while ((e=readdir(dp))){
             if (!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue;
             char sub[2048]; snprintf(sub,sizeof sub,"%s/%s",path,e->d_name);
-            gather(sub,base,list,n,cap);
+            gather(sub,base,list,n,cap,dirs);
         }
         closedir(dp);
+        if (*n==before && dirs){          /* nothing below it: an EMPTY folder, which only
+                                           * a folder record can carry into the archive */
+            const char *rel=path; size_t bl=strlen(base);
+            if (!strncmp(path,base,bl)) rel=path+bl+(path[bl]=='/'?1:0);
+            dirs_add(dirs,rel);
+        }
     } else {
         size_t len; uint8_t *d=read_file(path,&len); if(!d) return;
         /* member name = path relative to base's parent */
@@ -293,9 +356,167 @@ static void gather(const char *path, const char *base, InFile **list, int *n, in
     }
 }
 
+/* Build one member's stream (QCF header + ext byte + payload) from a file in memory.
+ * Returns malloc'd bytes; *len_out is their length. This is the piece `compress` and
+ * `add` share — the codec choice lives here and nowhere else. */
+static uint8_t *build_member_stream(const char *name, const uint8_t *fd, size_t len,
+                                    int q, uint32_t *len_out, int *codec_out, uint32_t *psize_out){
+    uint8_t *payload=NULL; uint32_t psize=0, inner_csize=0, field04=0;
+    int codec=CODEC_DEFLATE; uint8_t t4[4]={0x00,0x05,0x04,0x01};   /* deflate */
+    int isole2 = len>=8 && !memcmp(fd,"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",8);
+
+    /* DEFLATE baseline: cheap, never bloats. Serves as both the universal
+     * fallback and the yardstick a specialized codec must beat. */
+    uLongf cb=compressBound(len); uint8_t *defl=malloc(cb);
+    compress2(defl,&cb,fd,len,9); uint32_t defl_size=(uint32_t)cb;
+
+    /* Try JPEG2000 for images — but only keep it if it actually beats DEFLATE,
+     * so a tiny/already-compressed image (e.g. a small GIF) never *grows*. */
+    uint8_t *img=NULL; uint32_t imgsz=0;
+    if (g_image && catre_is_image(name))
+        img = catre_encode_image(fd, len, q, &imgsz);
+
+    if (img && imgsz < defl_size){              /* JPEG2000 wins */
+        payload=img; psize=imgsz; inner_csize=psize; field04=(uint32_t)len;
+        codec=CODEC_IMAGE; t4[0]=0x01;t4[1]=0x01;t4[2]=0x04;t4[3]=0x01;
+        free(defl);
+    } else if (g_office && isole2){             /* MSOC21: 36-byte hdr + zlib(whole OLE2) */
+        if (img) free(img);
+        uint32_t zc=defl_size;                  /* zlib(whole OLE2) == the deflate baseline */
+        psize=36+zc; payload=malloc(psize); uint8_t *p=payload;
+        memcpy(p,"\x32\x01\x12\x00\x00\x00",6); p+=6; memcpy(p,"\x33\x02",2); p+=2;
+        wr32(p,zc); p+=4; memset(p,0,6); p+=6;
+        memcpy(p,"\x04\x0a\x00\x05",4); p+=4; memcpy(p,MSOC_TAIL,14); p+=14;
+        memcpy(p,defl,zc); free(defl);
+        codec=CODEC_OLE2; field04=(uint32_t)len; inner_csize=0;  /* office: +08 stays 0 */
+        t4[0]=0x00;t4[1]=0x00;t4[2]=0x02;t4[3]=0x01;
+    } else {                                    /* deflate (default / image fallback) */
+        if (img) free(img);
+        payload=defl; psize=defl_size; inner_csize=psize;
+    }
+    const char *bn=strrchr(name,'/');
+    uint8_t ext=(uint8_t)(bn ? bn[1] : name[0]);   /* 1st char of basename */
+    Buf inner={0};
+    bu32(&inner,MAGIC_QCF); bu32(&inner,field04); bu32(&inner,inner_csize); bu32(&inner,0);
+    bu32(&inner,0x0011001E);
+    uint8_t tail[8]={0x01,0x00,0x04,0x00, t4[0],t4[1],t4[2],t4[3]};
+    bput(&inner,tail,8);
+    bu8(&inner,ext); bput(&inner,payload,psize);
+    free(payload);
+    *len_out=(uint32_t)inner.n;
+    if (codec_out) *codec_out=codec;
+    if (psize_out) *psize_out=psize;
+    return inner.p;
+}
+
+/* A member as it will be written: metadata plus its stream bytes, which may have just
+ * been built from a file OR copied verbatim out of an existing archive (that is how
+ * `add`/`delete` keep members whose codec we cannot decode). */
+typedef struct {
+    char name[1024];
+    uint32_t orig, dt;
+    const uint8_t *inner; uint32_t inner_len;
+    uint8_t *owned;                 /* non-NULL when we allocated `inner` */
+} OutMember;
+
+/* Assemble a QCM archive: header, member streams, then the central directory with
+ * folder records (including empty folders) and file records wired to their parents. */
+static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
+    Buf out_b={0}; bu32(&out_b,MAGIC_QCM); bu32(&out_b,0);   /* [+04] patched below */
+    uint32_t *so=malloc((n?n:1)*sizeof(uint32_t));
+    uint32_t dt = n ? m[0].dt : now_dos();
+    for (int i=0;i<n;i++){
+        if (i==0){ so[0]=(uint32_t)out_b.n-4; bput(&out_b,m[i].inner,m[i].inner_len);
+                   wr32(out_b.p+4,(uint32_t)out_b.n-4); }
+        else { so[i]=(uint32_t)out_b.n; bu32(&out_b,4+m[i].inner_len);
+               bput(&out_b,m[i].inner,m[i].inner_len); }
+    }
+    uint32_t cdir=(uint32_t)out_b.n;
+    for (int z=0;z<9;z++) bu8(&out_b,0);
+    bu32(&out_b,dt); bu32(&out_b,0);
+    uint8_t toph[3]={3,0,0}; bput(&out_b,toph,3); bput(&out_b,"TOP",3);
+
+    /* Record order mirrors the engine's own archives: the files of a folder first,
+     * then each subfolder's record followed by its contents (depth first). Emitting
+     * every folder up front builds the same tree and the engine reads it either way —
+     * this just keeps our output shaped like the original's.
+     * (Unrelated, but worth writing down: the engine's single-file DecompressFile API
+     * returns E_INVALIDARG on an archive with no file at the ROOT, whatever wrote it,
+     * because there is no single file for it to extract. Folder archives are the
+     * shell's job in the original product.) */
+    static DirList all; all.n=0;
+    for (int i=0;i<n;i++){                       /* every prefix of every member path */
+        char *nm=m[i].name;
+        for (char *s2=nm; *s2; s2++) if (*s2=='/'){
+            int L=s2-nm; char pre[1024]; if(L>=1024)L=1023; memcpy(pre,nm,L); pre[L]=0;
+            dirs_add(&all,pre);
+        }
+    }
+    if (extra_dirs) for (int i=0;i<extra_dirs->n;i++){
+        dirs_add(&all,extra_dirs->name[i]);
+        for (char *s2=extra_dirs->name[i]; *s2; s2++) if (*s2=='/'){   /* and its parents */
+            int L=s2-extra_dirs->name[i]; char pre[1024]; if(L>=1024)L=1023;
+            memcpy(pre,extra_dirs->name[i],L); pre[L]=0; dirs_add(&all,pre);
+        }
+    }
+
+    /* iterative depth-first walk over (prefix, parent record offset) */
+    typedef struct { char prefix[1024]; uint32_t parent; } Frame;
+    static Frame stack[MAXDIRS]; int sp=0;
+    static int dir_done[MAXDIRS];
+    for (int i=0;i<all.n;i++) dir_done[i]=0;
+    stack[sp].prefix[0]=0; stack[sp].parent=cdir; sp++;
+    while (sp>0){
+        Frame fr=stack[--sp];
+        size_t plen=strlen(fr.prefix);
+        for (int i=0;i<n;i++){                   /* files directly in this folder */
+            const char *nm=m[i].name;
+            const char *ls=strrchr(nm,'/');
+            int in_here = plen ? (!strncmp(nm,fr.prefix,plen) && nm[plen]=='/' &&
+                                  ls==nm+plen)
+                               : (ls==NULL);
+            if (!in_here) continue;
+            const char *bn = ls ? ls+1 : nm;
+            bu32(&out_b,fr.parent); bu32(&out_b,so[i]); bu8(&out_b,2); bu32(&out_b,m[i].dt);
+            bu32(&out_b,m[i].orig);
+            size_t nl=strlen(bn); bu8(&out_b,(uint8_t)nl); bu8(&out_b,0); bu8(&out_b,0);
+            bput(&out_b,bn,nl);
+        }
+        /* subfolders of this folder, deepest pushed last so they come out in order */
+        int children[MAXDIRS]; int nc=0;
+        for (int i=0;i<all.n;i++){
+            if (dir_done[i]) continue;
+            const char *dn=all.name[i];
+            const char *ls=strrchr(dn,'/');
+            int in_here = plen ? (!strncmp(dn,fr.prefix,plen) && dn[plen]=='/' && ls==dn+plen)
+                               : (ls==NULL);
+            if (in_here && nc<MAXDIRS) children[nc++]=i;
+        }
+        for (int c=nc-1;c>=0;c--){
+            int i=children[c]; dir_done[i]=1;
+            const char *dn=all.name[i];
+            const char *ls=strrchr(dn,'/'); const char *bn = ls ? ls+1 : dn;
+            uint32_t myoff=(uint32_t)out_b.n;
+            bu32(&out_b,fr.parent); bu32(&out_b,0); bu8(&out_b,0); bu32(&out_b,dt);  /* type=0 */
+            bu32(&out_b,0); size_t nl=strlen(bn); bu8(&out_b,(uint8_t)nl); bu8(&out_b,0); bu8(&out_b,0);
+            bput(&out_b,bn,nl);
+            if (sp<MAXDIRS){ strncpy(stack[sp].prefix,dn,sizeof stack[sp].prefix-1);
+                             stack[sp].prefix[sizeof stack[sp].prefix-1]=0;
+                             stack[sp].parent=myoff; sp++; }
+        }
+    }
+    FILE *f=fopen(out,"wb");
+    if(!f){ bar_clear(); perror("open out"); free(so); free(out_b.p); return -1; }
+    fwrite(out_b.p,1,out_b.n,f); fclose(f);
+    int written=(int)out_b.n;
+    free(so); free(out_b.p);
+    return written;
+}
+
 static int cmd_compress(int argc, char **argv){
     const char *out=NULL; int q=100, verbose=0;
     InFile *files=NULL; int nf=0, cap=0;
+    static DirList dirs; dirs.n=0;
     for (int i=0;i<argc;i++){
         if (!strcmp(argv[i],"-o")||!strcmp(argv[i],"--output")) out=argv[++i];
         else if (!strcmp(argv[i],"-q")||!strcmp(argv[i],"--quality")) q=atoi(argv[++i]);
@@ -305,14 +526,12 @@ static int cmd_compress(int argc, char **argv){
         else if (!strcmp(argv[i],"--store")) { g_image=0; g_office=0; }
         else if (!strcmp(argv[i],"--no-image")) g_image=0;
         else {
-            char base[2048]; strncpy(base,argv[i],sizeof base-1); base[sizeof base-1]=0;
             struct stat sb; char parent[2048];
             if (stat(argv[i],&sb)==0 && S_ISDIR(sb.st_mode)){
-                strncpy(parent,argv[i],sizeof parent-1);
-                char *s=strrchr(parent,'/'); if(s)*s=0; else strcpy(parent,".");
-                gather(argv[i],parent,&files,&nf,&cap);
+                strncpy(parent,argv[i],sizeof parent-1); parent[sizeof parent-1]=0;
+                char *s2=strrchr(parent,'/'); if(s2)*s2=0; else strcpy(parent,".");
+                gather(argv[i],parent,&files,&nf,&cap,&dirs);
             } else {
-                strcpy(parent,"."); /* file: relative name = basename */
                 size_t len; uint8_t *d=read_file(argv[i],&len);
                 if(d){ const char*bn=strrchr(argv[i],'/'); bn=bn?bn+1:argv[i];
                     if(nf>=cap){cap=cap*2+16;files=realloc(files,cap*sizeof(InFile));}
@@ -321,61 +540,20 @@ static int cmd_compress(int argc, char **argv){
         }
     }
     if (!out){ fprintf(stderr,"catre: -o/--output required\n"); return 2; }
-    if (!nf){ fprintf(stderr,"catre: no input files\n"); return 2; }
+    if (!nf && !dirs.n){ fprintf(stderr,"catre: no input files\n"); return 2; }
 
     uint32_t dt=now_dos();
-    Buf out_b={0}; bu32(&out_b,MAGIC_QCM); bu32(&out_b,0);   /* [+04] patched later */
-    uint32_t *so=malloc(nf*sizeof(uint32_t)); size_t total_in=0;
-    for (int i=0;i<nf;i++) total_in+=files[i].len;
+    size_t total_in=0; for (int i=0;i<nf;i++) total_in+=files[i].len;
     double t0=now_sec(); size_t done=0;
+    OutMember *om=calloc(nf?nf:1,sizeof(OutMember));
     for (int i=0;i<nf;i++){
         bar("Compressing", done, total_in, i, nf, files[i].name);
-        uint8_t *payload=NULL; uint32_t psize=0, inner_csize=0, field04=0;
-        int codec=CODEC_DEFLATE; uint8_t t4[4]={0x00,0x05,0x04,0x01};   /* deflate */
-        size_t len=files[i].len; const uint8_t *fd=files[i].data;
-        int isole2 = len>=8 && !memcmp(fd,"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",8);
-
-        /* DEFLATE baseline: cheap, never bloats. Serves as both the universal
-         * fallback and the yardstick a specialized codec must beat. */
-        uLongf cb=compressBound(len); uint8_t *defl=malloc(cb);
-        compress2(defl,&cb,fd,len,9); uint32_t defl_size=(uint32_t)cb;
-
-        /* Try JPEG2000 for images — but only keep it if it actually beats DEFLATE,
-         * so a tiny/already-compressed image (e.g. a small GIF) never *grows*. */
-        uint8_t *img=NULL; uint32_t imgsz=0;
-        if (g_image && catre_is_image(files[i].name))
-            img = catre_encode_image(fd, len, q, &imgsz);
-
-        if (img && imgsz < defl_size){              /* JPEG2000 wins */
-            payload=img; psize=imgsz; inner_csize=psize; field04=(uint32_t)len;
-            codec=CODEC_IMAGE; t4[0]=0x01;t4[1]=0x01;t4[2]=0x04;t4[3]=0x01;
-            free(defl);
-        } else if (g_office && isole2){             /* MSOC21: 36-byte hdr + zlib(whole OLE2) */
-            if (img) free(img);
-            uint32_t zc=defl_size;                  /* zlib(whole OLE2) == the deflate baseline */
-            psize=36+zc; payload=malloc(psize); uint8_t *p=payload;
-            memcpy(p,"\x32\x01\x12\x00\x00\x00",6); p+=6; memcpy(p,"\x33\x02",2); p+=2;
-            wr32(p,zc); p+=4; memset(p,0,6); p+=6;
-            memcpy(p,"\x04\x0a\x00\x05",4); p+=4; memcpy(p,MSOC_TAIL,14); p+=14;
-            memcpy(p,defl,zc); free(defl);
-            codec=CODEC_OLE2; field04=(uint32_t)len; inner_csize=0;  /* office: +08 stays 0 */
-            t4[0]=0x00;t4[1]=0x00;t4[2]=0x02;t4[3]=0x01;
-        } else {                                    /* deflate (default / image fallback) */
-            if (img) free(img);
-            payload=defl; psize=defl_size; inner_csize=psize;
-        }
-        const char *bn=strrchr(files[i].name,'/');
-        uint8_t ext=(uint8_t)(bn ? bn[1] : files[i].name[0]);   /* 1st char of basename */
-        Buf inner={0};
-        bu32(&inner,MAGIC_QCF); bu32(&inner,field04); bu32(&inner,inner_csize); bu32(&inner,0);
-        bu32(&inner,0x0011001E);
-        uint8_t tail[8]={0x01,0x00,0x04,0x00, t4[0],t4[1],t4[2],t4[3]};
-        bput(&inner,tail,8);
-        bu8(&inner,ext); bput(&inner,payload,psize);
-        if (i==0){ so[0]=(uint32_t)out_b.n-4; bput(&out_b,inner.p,inner.n);
-                   wr32(out_b.p+4,(uint32_t)out_b.n-4); }
-        else { so[i]=(uint32_t)out_b.n; bu32(&out_b,4+(uint32_t)inner.n); bput(&out_b,inner.p,inner.n); }
-        free(inner.p); free(payload);
+        int codec; uint32_t psize, ilen;
+        uint8_t *inner=build_member_stream(files[i].name, files[i].data, files[i].len,
+                                           q, &ilen, &codec, &psize);
+        strncpy(om[i].name,files[i].name,sizeof om[i].name-1);
+        om[i].orig=(uint32_t)files[i].len; om[i].dt=dt;
+        om[i].inner=inner; om[i].inner_len=ilen; om[i].owned=inner;
         done+=files[i].len;
         if (verbose){ char a[16],b[16]; double r=files[i].len?100.0*psize/files[i].len:0;
             bar_clear();
@@ -384,54 +562,138 @@ static int cmd_compress(int argc, char **argv){
                    codec==CODEC_IMAGE?"[jp2]":codec==CODEC_OLE2?"[office]":"[deflate]"); }
     }
     bar("Compressing", total_in, total_in, nf, nf, "done");
-    uint32_t cdir=(uint32_t)out_b.n;
-    for (int z=0;z<9;z++) bu8(&out_b,0);
-    bu32(&out_b,dt); bu32(&out_b,0);
-    uint8_t toph[3]={3,0,0}; bput(&out_b,toph,3); bput(&out_b,"TOP",3);
+    int written=write_qcm(out,om,nf,&dirs);
+    for (int i=0;i<nf;i++) free(om[i].owned);
+    free(om);
+    bar_clear();
+    if (written<0) return 1;
+    double dt_s=now_sec()-t0, ratio=total_in?100.0*written/total_in:0;
+    char a[16],b[16],sp[16];
+    printf("Created %s: %d file(s)%s, %s -> %s (%.1f%%), %.2fs, %s/s\n",
+           out, nf, dirs.n?" + empty folder(s)":"", human((double)total_in,a),
+           human((double)written,b), ratio, dt_s,
+           human(dt_s>0?total_in/dt_s:total_in, sp));
+    return 0;
+}
 
-    /* native folder records: type=0x00 folder entries + parent pointers.
-       Collect unique directory prefixes, emit them shallow-first (so a parent
-       folder's record precedes its children), then emit file records. */
-    static char dirs[MAXMEM][1024]; uint32_t diroff[MAXMEM]; int ndir=0;
-    for (int i=0;i<nf;i++){
-        char *nm=files[i].name;
-        for (char *s=nm; *s; s++) if (*s=='/'){
-            int L=s-nm; char pre[1024]; if(L>=1024)L=1023; memcpy(pre,nm,L); pre[L]=0;
-            int found=0; for(int j=0;j<ndir;j++) if(!strcmp(dirs[j],pre)){found=1;break;}
-            if(!found && ndir<MAXMEM){ strcpy(dirs[ndir++],pre); }
+/* ---------- add / delete: rewrite an archive, keeping members we can't decode ----------
+ * Both work on the stored streams, never on decoded data, so a member in one of the
+ * engine's proprietary codecs survives the operation byte-for-byte. */
+static int cmd_add(int argc, char **argv){
+    const char *arc=NULL; int q=100, verbose=0;
+    InFile *files=NULL; int nf=0, cap=0;
+    static DirList newdirs; newdirs.n=0;
+    for (int i=0;i<argc;i++){
+        if (!strcmp(argv[i],"-q")||!strcmp(argv[i],"--quality")) q=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) verbose=1;
+        else if (!strcmp(argv[i],"--no-progress")) g_progress=0;
+        else if (!strcmp(argv[i],"-p")||!strcmp(argv[i],"--progress")) g_progress=2;
+        else if (!strcmp(argv[i],"--store")) { g_image=0; g_office=0; }
+        else if (!strcmp(argv[i],"--no-image")) g_image=0;
+        else if (!arc) arc=argv[i];
+        else {
+            struct stat sb; char parent[2048];
+            if (stat(argv[i],&sb)==0 && S_ISDIR(sb.st_mode)){
+                strncpy(parent,argv[i],sizeof parent-1); parent[sizeof parent-1]=0;
+                char *s2=strrchr(parent,'/'); if(s2)*s2=0; else strcpy(parent,".");
+                gather(argv[i],parent,&files,&nf,&cap,&newdirs);
+            } else {
+                size_t len; uint8_t *d=read_file(argv[i],&len);
+                if(d){ const char*bn=strrchr(argv[i],'/'); bn=bn?bn+1:argv[i];
+                    if(nf>=cap){cap=cap*2+16;files=realloc(files,cap*sizeof(InFile));}
+                    files[nf].name=strdup(bn); files[nf].data=d; files[nf].len=len; nf++; }
+            }
         }
     }
-    for(int i=0;i<ndir;i++) for(int j=i+1;j<ndir;j++){           /* sort by depth asc */
-        int di=0,dj=0; for(char*s=dirs[i];*s;s++)di+=(*s=='/'); for(char*s=dirs[j];*s;s++)dj+=(*s=='/');
-        if(dj<di){ char t[1024]; strcpy(t,dirs[i]);strcpy(dirs[i],dirs[j]);strcpy(dirs[j],t); }
+    if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
+    if(!nf && !newdirs.n){ fprintf(stderr,"catre: nothing to add\n"); return 2; }
+
+    size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
+    static Member mem[MAXMEM]; static DirList olddirs;
+    olddirs.n=0;
+    int n=qcm_read_ex(d,len,mem,MAXMEM,NULL,&olddirs);
+    if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); free(d); return 1; }
+
+    OutMember *om=calloc(n+nf,sizeof(OutMember)); int on=0;
+    for (int i=0;i<n;i++){                       /* keep, unless the name is replaced */
+        int replaced=0;
+        for (int j=0;j<nf;j++) if(!strcmp(files[j].name,mem[i].name)) replaced=1;
+        if (replaced) continue;
+        strncpy(om[on].name,mem[i].name,sizeof om[on].name-1);
+        om[on].orig=mem[i].orig; om[on].dt=mem[i].dt;
+        om[on].inner=d+mem[i].inner_off; om[on].inner_len=mem[i].inner_len;
+        on++;
     }
-    for(int i=0;i<ndir;i++){                                     /* folder records */
-        uint32_t myoff=(uint32_t)out_b.n;
-        char *ls=strrchr(dirs[i],'/'); uint32_t par=cdir; const char *bn=dirs[i];
-        if(ls){ int L=ls-dirs[i]; char pp[1024]; memcpy(pp,dirs[i],L); pp[L]=0; bn=ls+1;
-            for(int j=0;j<ndir;j++) if(!strcmp(dirs[j],pp)){par=diroff[j];break;} }
-        bu32(&out_b,par); bu32(&out_b,0); bu8(&out_b,0); bu32(&out_b,dt);   /* type=0 folder */
-        bu32(&out_b,0); size_t nl=strlen(bn); bu8(&out_b,(uint8_t)nl); bu8(&out_b,0); bu8(&out_b,0);
-        bput(&out_b,bn,nl);
-        diroff[i]=myoff;
+    uint32_t dt=now_dos();
+    for (int j=0;j<nf;j++){
+        bar("Adding", j, nf, j, nf, files[j].name);
+        int codec; uint32_t psize, ilen;
+        uint8_t *inner=build_member_stream(files[j].name,files[j].data,files[j].len,
+                                           q,&ilen,&codec,&psize);
+        strncpy(om[on].name,files[j].name,sizeof om[on].name-1);
+        om[on].orig=(uint32_t)files[j].len; om[on].dt=dt;
+        om[on].inner=inner; om[on].inner_len=ilen; om[on].owned=inner;
+        if (verbose){ bar_clear(); printf("  + %s\n",files[j].name); }
+        on++;
     }
-    for (int i=0;i<nf;i++){                                      /* file records */
-        char *nm=files[i].name; char *ls=strrchr(nm,'/'); uint32_t par=cdir; const char *bn=nm;
-        if(ls){ int L=ls-nm; char pp[1024]; memcpy(pp,nm,L); pp[L]=0; bn=ls+1;
-            for(int j=0;j<ndir;j++) if(!strcmp(dirs[j],pp)){par=diroff[j];break;} }
-        bu32(&out_b,par); bu32(&out_b,so[i]); bu8(&out_b,2); bu32(&out_b,dt);
-        bu32(&out_b,(uint32_t)files[i].len);
-        size_t nl=strlen(bn); bu8(&out_b,(uint8_t)nl); bu8(&out_b,0); bu8(&out_b,0);
-        bput(&out_b,bn,nl);
-    }
-    FILE *f=fopen(out,"wb"); if(!f){ bar_clear(); perror("open out"); return 1; }
-    fwrite(out_b.p,1,out_b.n,f); fclose(f);
+    for (int i=0;i<newdirs.n;i++) dirs_add(&olddirs,newdirs.name[i]);
+    int written=write_qcm(arc,om,on,&olddirs);
+    for (int i=0;i<on;i++) free(om[i].owned);
+    free(om); free(d);
     bar_clear();
-    double dt_s=now_sec()-t0, ratio=total_in?100.0*out_b.n/total_in:0;
-    char a[16],b[16],sp[16];
-    printf("Created %s: %d file(s), %s -> %s (%.1f%%), %.2fs, %s/s\n",
-           out, nf, human((double)total_in,a), human((double)out_b.n,b), ratio, dt_s,
-           human(dt_s>0?total_in/dt_s:total_in, sp));
+    if (written<0) return 1;
+    char a[16];
+    printf("Updated %s: %d file(s) total (%s)\n", arc, on, human((double)written,a));
+    return 0;
+}
+
+static int cmd_delete(int argc, char **argv){
+    const char *arc=NULL; int verbose=0; const char *names[MAXMEM]; int nn=0;
+    for (int i=0;i<argc;i++){
+        if (!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) verbose=1;
+        else if (!strcmp(argv[i],"--no-progress")||!strcmp(argv[i],"-p")||!strcmp(argv[i],"--progress")) {}
+        else if (!arc) arc=argv[i];
+        else if (nn<MAXMEM) names[nn++]=argv[i];
+    }
+    if(!arc || !nn){ fprintf(stderr,"catre: usage: catre delete <archive> <member>...\n"); return 2; }
+    size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
+    static Member mem[MAXMEM]; static DirList dirs; dirs.n=0;
+    int n=qcm_read_ex(d,len,mem,MAXMEM,NULL,&dirs);
+    if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); free(d); return 1; }
+
+    OutMember *om=calloc(n?n:1,sizeof(OutMember)); int on=0, removed=0;
+    for (int i=0;i<n;i++){
+        int drop=0;
+        for (int j=0;j<nn;j++){
+            size_t L=strlen(names[j]);
+            /* exact name, or everything under a folder the user named */
+            if (!strcmp(mem[i].name,names[j]) ||
+                (!strncmp(mem[i].name,names[j],L) && mem[i].name[L]=='/')) drop=1;
+        }
+        if (drop){ removed++; if(verbose) printf("  - %s\n",mem[i].name); continue; }
+        strncpy(om[on].name,mem[i].name,sizeof om[on].name-1);
+        om[on].orig=mem[i].orig; om[on].dt=mem[i].dt;
+        om[on].inner=d+mem[i].inner_off; om[on].inner_len=mem[i].inner_len;
+        on++;
+    }
+    if (!removed){ fprintf(stderr,"catre: no member matched\n"); free(om); free(d); return 1; }
+    /* a folder the user deleted should not come back through the folder records */
+    static DirList keep; keep.n=0;
+    for (int i=0;i<dirs.n;i++){
+        int drop=0;
+        for (int j=0;j<nn;j++){
+            size_t L=strlen(names[j]);
+            if (!strcmp(dirs.name[i],names[j]) ||
+                (!strncmp(dirs.name[i],names[j],L) && dirs.name[i][L]=='/')) drop=1;
+        }
+        if (!drop) dirs_add(&keep,dirs.name[i]);
+    }
+    int written=write_qcm(arc,om,on,&keep);
+    free(om); free(d);
+    if (written<0) return 1;
+    char a[16];
+    printf("Deleted %d member(s) from %s: %d left (%s)\n", removed, arc, on,
+           human((double)written,a));
     return 0;
 }
 
@@ -443,23 +705,52 @@ static void mkdirs(const char *path){
 
 static int cmd_extract(int argc, char **argv){
     const char *arc=NULL,*out="."; int verbose=0;
+    const char *want[MAXMEM]; int nwant=0;          /* -m: extract only these members */
     for (int i=0;i<argc;i++){
         if (!strcmp(argv[i],"-o")||!strcmp(argv[i],"--output")) out=argv[++i];
         else if (!strcmp(argv[i],"-v")||!strcmp(argv[i],"--verbose")) verbose=1;
         else if (!strcmp(argv[i],"--no-progress")) g_progress=0;
         else if (!strcmp(argv[i],"-p")||!strcmp(argv[i],"--progress")) g_progress=2;
+        else if (!strcmp(argv[i],"-m")||!strcmp(argv[i],"--members")){
+            while (i+1<argc && argv[i+1][0]!='-' && nwant<MAXMEM) want[nwant++]=argv[++i];
+        }
         else arc=argv[i];
     }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    static Member mem[MAXMEM]; int n=qcm_read(d,len,mem,MAXMEM,NULL);
+    static Member mem[MAXMEM]; static DirList dirs; dirs.n=0;
+    int n=qcm_read_ex(d,len,mem,MAXMEM,NULL,&dirs);
     if (n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); return 1; }
     mkdir(out,0755);
+    /* recreate folder records first — an EMPTY folder exists only as a record, so
+     * waiting for a file to mkdir its parents would silently drop it. */
+    for (int i=0;i<dirs.n;i++){
+        if (nwant){
+            int hit=0;
+            for (int j=0;j<nwant;j++){
+                size_t L=strlen(want[j]);
+                if (!strcmp(dirs.name[i],want[j]) ||
+                    (!strncmp(dirs.name[i],want[j],L) && dirs.name[i][L]=='/')) hit=1;
+            }
+            if (!hit) continue;
+        }
+        char dpath[2300]; snprintf(dpath,sizeof dpath,"%s/%s/",out,dirs.name[i]);
+        mkdirs(dpath);
+    }
     size_t total_out=0; for(int i=0;i<n;i++) total_out+=mem[i].codec?mem[i].comp:mem[i].orig;
     double t0=now_sec(); size_t prog=0;
     int done=0;
     int skipped=0;
     for (int i=0;i<n;i++){
+        if (nwant){                                  /* -m: a name, or a folder's contents */
+            int hit=0;
+            for (int j=0;j<nwant;j++){
+                size_t L=strlen(want[j]);
+                if (!strcmp(mem[i].name,want[j]) ||
+                    (!strncmp(mem[i].name,want[j],L) && mem[i].name[L]=='/')) hit=1;
+            }
+            if (!hit) continue;
+        }
         bar("Extracting", prog, total_out, i, n, mem[i].name);
         char target[2300];
         /* office-ps (per-stream) is not one format: the engine picks among several
@@ -645,11 +936,15 @@ static void usage(void){
 "usage: catre <command> [options]\n\n"
 "Commands:\n"
 "  compress, c   FILE|DIR... -o OUT.qcf [-q 0-100] [-v]   Create an archive\n"
-"  extract,  x   ARCHIVE.qcf [-o DIR] [-v]                Extract files\n"
+"  add,      a   ARCHIVE.qcf FILE|DIR... [-q 0-100] [-v]  Add files to an archive\n"
+"  delete,   d   ARCHIVE.qcf MEMBER... [-v]               Remove members\n"
+"  extract,  x   ARCHIVE.qcf [-o DIR] [-m NAME...] [-v]   Extract files\n"
 "  list,     l   ARCHIVE.qcf [-v]                         List contents\n"
 "  info,     i   ARCHIVE.qcf                              Header & codec details\n"
 "  test,     t   ARCHIVE.qcf [-v]                         Verify integrity\n\n"
-"Compress options:\n"
+"Extract options:\n"
+"  -m NAME...   extract only these members (naming a folder takes its contents)\n\n"
+"Compress / add options:\n"
 "  -q 0-100     image quality: target PSNR for JPEG2000 (q0~26.7dB .. q100~32.2dB,\n"
 "               calibrated to the original engine). Lossy; default 100.\n"
 "  --store      no special codecs — store every file with lossless DEFLATE\n"
@@ -667,6 +962,8 @@ int main(int argc, char **argv){
     if (!strcmp(c,"-V")||!strcmp(c,"--version")){ printf("CAT RE v" VERSION "\n"); return 0; }
     if (!strcmp(c,"-h")||!strcmp(c,"--help")){ usage(); return 0; }
     if (!strcmp(c,"compress")||!strcmp(c,"c")) return cmd_compress(argc-2,argv+2);
+    if (!strcmp(c,"add")     ||!strcmp(c,"a")) return cmd_add(argc-2,argv+2);
+    if (!strcmp(c,"delete")  ||!strcmp(c,"d")) return cmd_delete(argc-2,argv+2);
     if (!strcmp(c,"extract") ||!strcmp(c,"x")) return cmd_extract(argc-2,argv+2);
     if (!strcmp(c,"list")    ||!strcmp(c,"l")) return cmd_list(argc-2,argv+2);
     if (!strcmp(c,"info")    ||!strcmp(c,"i")) return cmd_info(argc-2,argv+2);
