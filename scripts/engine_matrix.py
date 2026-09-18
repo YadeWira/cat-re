@@ -107,13 +107,14 @@ def same_bytes(a: str, b: str) -> bool:
         return False
 
 
-def run_one(src: str, quality: int) -> dict:
+def run_one(src: str, quality: int, ceiling: bool = False) -> dict:
     """Full round of the matrix for one input file. Returns a CSV row."""
     name = os.path.basename(src)
     row = {"file": name, "size": os.path.getsize(src), "ext": os.path.splitext(name)[1].lower(),
            "engine_codec_bytes": "", "payload_magic": "", "catre_codec": "", "our_codec": "",
            "engine_compressed": False, "we_decoded": False, "we_byte_exact": False,
-           "our_size": 0, "engine_size": 0, "engine_read_ours": False, "note": ""}
+           "our_size": 0, "engine_size": 0, "engine_read_ours": False,
+           "engine_round_trip_exact": False, "note": ""}
 
     for stale in ("eng.qcf", "our.qcf", "back.out"):
         p = os.path.join(WINEDIR, stale)
@@ -151,6 +152,14 @@ def run_one(src: str, quality: int) -> dict:
         row["we_decoded"] = bool(produced)
         if produced:
             row["we_byte_exact"] = any(same_bytes(work, p) for p in produced)
+        # 2b) the CEILING: does the ENGINE restore its own archive byte-exact? Whatever
+        # it cannot restore, nothing can — that is the denominator that matters.
+        if ceiling:
+            rt = os.path.join(WINEDIR, "rt.out")
+            if os.path.exists(rt):
+                os.remove(rt)
+            wine(["dec.exe", f"{WINEDIR_WIN}\\eng.qcf", f"{WINEDIR_WIN}\\rt.out"])
+            row["engine_round_trip_exact"] = os.path.isfile(rt) and same_bytes(work, rt)
         if "SKIP" in ext.stderr:
             row["note"] = "skipped"
         elif "FAILED" in ext.stderr:
@@ -206,6 +215,15 @@ def summarize(rows: list[dict]) -> None:
         print(f"{codec:<26} {n:>5} {dec:>6}  {exact:>11}  {shown:>20}")
     lossless = [r for r in rows if r["catre_codec"] not in IMAGE_CODECS
                 and r.get("our_codec", "") not in IMAGE_CODECS]
+    if any(r.get("engine_round_trip_exact") for r in rows):
+        eng_exact = [r for r in rows if r["engine_round_trip_exact"]]
+        got = [r for r in eng_exact if r["we_byte_exact"]]
+        print(f"\nFidelidad frente al TECHO: el motor restaura exacto {len(eng_exact)} de "
+              f"{len(rows)} archivos; de esos, catre restaura exacto {len(got)} "
+              f"({100.0*len(got)/len(eng_exact):.1f}%)")
+        missed = [r for r in eng_exact if not r["we_byte_exact"]]
+        for r in missed[:8]:
+            print(f"  hueco: {r['file']} ({r['catre_codec']})")
     n = len(rows)
     eng_ok = sum(1 for r in rows if r["engine_compressed"])
     print("-" * 76)
@@ -233,6 +251,9 @@ def main() -> None:
     ap.add_argument("--inputs", nargs="*", help="explicit input files instead of --corpus")
     ap.add_argument("--quality", type=int, default=100, help="lQuality passed to both sides")
     ap.add_argument("--out", default="engine_matrix.csv", help="CSV to write")
+    ap.add_argument("--ceiling", action="store_true",
+                    help="also decompress each engine archive WITH THE ENGINE, to measure "
+                         "what is recoverable at all")
     args = ap.parse_args()
 
     check_env()
@@ -263,7 +284,7 @@ def main() -> None:
     for i, f in enumerate(files, 1):
         print(f"\r[{i}/{len(files)}] {os.path.basename(f)[:48]:<48}", end="", flush=True)
         try:
-            rows.append(run_one(f, args.quality))
+            rows.append(run_one(f, args.quality, args.ceiling))
         except Exception as e:                      # one bad file must not sink the run
             print(f"\n  ! {f}: {e}", file=sys.stderr)
     print()
