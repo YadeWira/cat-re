@@ -7,7 +7,7 @@ Deliverables (the C tool runs on Linux **and** Windows):
 
 | Component     | Language | Purpose                                                |
 |---------------|----------|--------------------------------------------------------|
-| `tools/catre.c` | C      | **CAT RE v1.6** — the main archiver (zero-dependency static binary). |
+| `tools/catre.c` | C      | **CAT RE v1.7** — the main archiver (zero-dependency static binary). |
 | `qcf_tool/`   | Python   | Pure-Python reader (every codec identified) + DEFLATE writer. |
 | `libcat/`     | C        | Native port of the algorithms + `cat-tool` CLI.        |
 | `harness/`    | C        | Wine harness to drive the original Windows DLLs.       |
@@ -49,7 +49,7 @@ notes (format layout, codec dispatch table, COM IIDs, etc.).
 
 ## Quick start
 
-### CAT RE v1.6 CLI (recommended)
+### CAT RE v1.7 CLI (recommended)
 
 `catre` is the main archiver — a **native C** tool (links zlib + OpenJPEG statically; no
 original DLLs). It reads real `.qcf` (single/multi/nested folders) and writes DEFLATE +
@@ -85,7 +85,7 @@ It **writes only DEFLATE**: the JPEG2000/Office *encoders* live solely in the na
 ### Python library (`qcf-tool`)
 
 ```bash
-# 47 tests, all green
+# 48 tests, all green
 PYTHONPATH=. python3 -m pytest tests/ -v
 
 # Inspect a .qcf file
@@ -124,6 +124,13 @@ backend matrix.
 How complete is this as a clone of the original product? Two answers, because the
 denominator matters — **≈90 % of the engine, ≈60 % of the full desktop product**.
 
+> **How this is measured.** `scripts/engine_matrix.py` runs the *original engine* and `catre`
+> over the same files and compares bytes, including what the engine itself restores. The number
+> that matters is not "what we decode" but "what is recoverable at all": over 31 real Office
+> documents, **every file the original software restores exactly, `catre` restores exactly too
+> (22/22), and every member we skip (9/9) is one the original software does not restore either**
+> — it re-encodes the document. Same shape for PDF. Full results: `docs/RE_verified.md` §11.
+
 **Engine & format** (the actual technical core — read/write `.qcf` with its codecs):
 
 | Component | Status | Notes |
@@ -132,8 +139,8 @@ denominator matters — **≈90 % of the engine, ≈60 % of the full desktop pro
 | DEFLATE codec (generic, text, PDF, ZIP) | ✅ **100 %** | standard zlib |
 | JPEG2000 image codec (read + write, `-q`) | ✅ **~99 %** | PSNR-targeted, calibrated to the engine's quality→PSNR curve (validated: same PSNR per `-q` on test images). **Byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) but quality and size now track the engine |
 | Office MSOC21 — whole-file variant | ✅ **100 %** | read + write, engine-validated |
-| Office MSOC21 — per-stream variant (real Word/Excel) | 🟡 **partial** | it's **multi-mode**: its *whole-file zlib* mode is lossless and **decoded** (shipping `catre` and the Python front-end both extract those members byte-exact, since v1.5); the *structural-model* and *sparse-XLS (non-deflate)* modes are opaque/custom and out of scope — those members are listed and skipped with a clear message |
-| PDF (`PdfProc`) — reading engine archives | ❌ **not decodable** | writing is fine (we DEFLATE the file and the engine restores it byte-exact), but the *engine's own* PDF members hold a structural payload (`32 01 78 …`), not zlib-of-file — identified as `pdf-proc` and skipped |
+| Office MSOC21 — per-stream variant (real Word/Excel) | 🟡 **partial = the ceiling** | it's **multi-mode**: its *whole-file zlib* mode is lossless and **decoded** (shipping `catre` and the Python front-end both extract those members byte-exact, since v1.5); the *structural-model* and *sparse-XLS (non-deflate)* modes are opaque/custom and out of scope — those members are listed and skipped with a clear message — and **measured**: the engine itself does not restore them byte-exact (it re-encodes the document), so nothing decodable is being missed |
+| PDF (`PdfProc`) — reading engine archives | 🟡 **partial, and that is the ceiling** | two modes: the *whole-file* one decodes **byte-exact** (v1.7); the *structural* one is skipped — and the original software does not restore those PDFs either (measured) |
 | Engine image codec `0x02` (GIF, paletted/gray PNG) | ❌ **not decodable** | measured 2026-09: not JPEG2000 at all (no `FF4F` codestream); identified as `image-x` and skipped |
 | LFC / LEADTOOLS codec | ❌ **out of scope** | confirmed (2026-06) to be **LEAD Technologies' proprietary CMP/CMW** format (`LFCMP13n.dll`). The engine selects it by input type — **TIFF / high-bit-depth grayscale → LEAD CMP** (codec id `0x09`); PNG/GIF/BMP/JPG → JPEG2000. It is a *third party's* IP with no public spec and no open decoder (LEADTOOLS is still a sold product), so reimplementing it is off-limits — unlike the expired QuikCAT/CAT patents. Also lossy here (16-bit → 8-bit). |
 | **Engine overall** | **~90 %** | everything needed to read/write `.qcf` for files, images, folders, and generic Office |
@@ -252,9 +259,9 @@ output size tracks image content like the real engine does. A 628 KB photographi
 ## Project layout
 
 ```
-tools/catre.c            CAT RE v1.6 — native C archiver (main tool; build with `make catre`)
+tools/catre.c            CAT RE v1.7 — native C archiver (main tool; build with `make catre`)
 qcf_tool/                Python reimplementation (same CLI + library)
-  catre.py               CAT RE v1.6 CLI (compress/extract/list/info/test)
+  catre.py               CAT RE v1.7 CLI (compress/extract/list/info/test)
   qcm.py                 REAL QCM parser+encoder (single/multi/folders, validated)
   format.py              low-level 28-byte QCF header primitive
   dispatch.py            backend router
@@ -274,6 +281,11 @@ docs/
   QCF_FORMAT_SPEC.md     implementable format spec (start here)
   RE_verified.md         binary-verified RE findings + evidence
   RE_notes.md, SUMMARY.md, SESION_NOCTURNA.md, PLAN.md, LINUX_PORT.md
+
+scripts/
+  engine_matrix.py       conformance harness: original engine vs catre, file by file
+  build-linux-deps.sh    static OpenJPEG for `make catre`
+  build-win-deps.sh      static zlib + OpenJPEG for the mingw cross-builds
 
 harness/                 working Wine/MinGW harnesses (drive the original DLLs)
   sfa.c                  produce/consume REAL .qcf via CompressFile

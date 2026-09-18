@@ -3,6 +3,36 @@
 All notable changes to **CAT RE** (the native `catre` archiver). Dates are UTC.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.7 — 2026-09-18
+
+Driven by a new conformance harness (`scripts/engine_matrix.py`) that runs the original
+engine and `catre` over the same corpus files and compares bytes. Measured results are in
+`docs/RE_verified.md` §11.
+
+### Added
+- **PDF members in the engine's whole-file mode now extract byte-exact.** `PdfProc` has the
+  same two-mode shape as the Office codec: one mode stores `zlib(whole file)` inside its
+  payload. That was the only *real* gap the measurements found — for the structural mode, the
+  original software does not restore the PDF either.
+- **Engine images with an alpha channel now decode.** An RGBA source makes the engine store
+  the alpha in its own block *before* the JPEG2000 codestream (35,859 bytes on an 800×600
+  PNG), so the codestream is not at `payload+26`; `catre` locates it by the `FF4F FF51` marker
+  and validates `Xsiz/Ysiz` against the wrapper. The picture is recovered (34.5 dB), the
+  transparency is not (that block uses an undecoded coder).
+- `scripts/engine_matrix.py`: the harness itself — CSV + summary of codec used, what we read,
+  what is byte-exact, and whether the engine reads our output. It exits cleanly where the
+  engine isn't available.
+
+### Measured (no code change, but it settles the roadmap)
+- **Office: zero real gaps.** Over 31 real documents, every file the *original engine* restores
+  exactly, `catre` also restores exactly (22/22); every file `catre` skips (9/9) is one the
+  engine itself returns altered — it re-encodes the document (a 66 KB `.xls` comes back as
+  85 KB with 58,355 differing bytes). Cloning that mode would reproduce the engine's damage,
+  not the input.
+- **A random 250-file corpus sample**: 248 deflate members, all byte-exact in both directions.
+- The engine's format→codec table is **declared in the registry**
+  (`SOFTWARE\QuikCAT\CODEC\1\{CLSID}`), and the header byte `+0x1A` is that `CodecID`.
+
 ## v1.6 — 2026-09-18
 
 Found by running the **original DLLs** (Wine) against `catre` on the same inputs and

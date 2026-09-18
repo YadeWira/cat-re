@@ -136,10 +136,38 @@ uint8_t *catre_encode_image(const uint8_t *data, size_t len, int quality, uint32
     return result;
 }
 
+/* Locate the J2K codestream inside an image member payload.
+ *
+ * It usually sits right after the 26-byte wrapper, but not always: when the source
+ * image had an ALPHA channel (e.g. an RGBA PNG), the engine stores the alpha in its
+ * own block first — measured on an 800x600 RGBA PNG, 35,859 bytes of it — and the
+ * codestream follows. So we scan for the SOC+SIZ marker pair and confirm the SIZ
+ * dimensions match the wrapper's, which rules out a chance match inside the alpha
+ * block. Returns the offset, or -1 if this member carries no JPEG2000 at all.
+ * (The alpha block itself uses a different, undecoded coder: we recover the picture,
+ * not its transparency.) */
+long catre_find_codestream(const uint8_t *payload, uint32_t len){
+    if (len <= 26) return -1;
+    uint32_t w = payload[2] | (payload[3] << 8);      /* wrapper: width, height */
+    uint32_t h = payload[4] | (payload[5] << 8);
+    for (uint32_t i = 26; i + 16 <= len; i++){
+        if (payload[i]!=0xFF || payload[i+1]!=0x4F || payload[i+2]!=0xFF || payload[i+3]!=0x51)
+            continue;
+        /* SIZ: [FF51][Lsiz 2][Rsiz 2][Xsiz 4][Ysiz 4] — big-endian */
+        const uint8_t *siz = payload + i + 6;
+        uint32_t xs = ((uint32_t)siz[2]<<24)|(siz[3]<<16)|(siz[4]<<8)|siz[5];
+        uint32_t ys = ((uint32_t)siz[6]<<24)|(siz[7]<<16)|(siz[8]<<8)|siz[9];
+        if (xs == w && ys == h) return (long)i;
+        if (i == 26) return (long)i;   /* dimensions unknown/odd but it IS at the usual spot */
+    }
+    return -1;
+}
+
 /* Decode an image member payload (wrapper+J2K) -> write PNG at out_path. */
 int catre_decode_image(const uint8_t *payload, uint32_t len, const char *out_path){
-    if (len <= 26) return 0;
-    MemBuf mb = { (uint8_t*)payload+26, len-26, len-26, 0 };
+    long cs = catre_find_codestream(payload, len);
+    if (cs < 0) return 0;
+    MemBuf mb = { (uint8_t*)payload+cs, len-cs, len-cs, 0 };
     opj_stream_t *st = opj_stream_default_create(OPJ_TRUE);    /* input stream */
     opj_stream_set_user_data(st, &mb, NULL);
     opj_stream_set_user_data_length(st, mb.n);
@@ -172,8 +200,9 @@ int catre_decode_image(const uint8_t *payload, uint32_t len, const char *out_pat
 /* Verify an image member: decode the J2K codestream and throw the pixels away.
  * Used by `catre test`, which must not report OK for a member it never decoded. */
 int catre_verify_image(const uint8_t *payload, uint32_t len){
-    if (len <= 26) return 0;
-    MemBuf mb = { (uint8_t*)payload+26, len-26, len-26, 0 };
+    long cs = catre_find_codestream(payload, len);
+    if (cs < 0) return 0;
+    MemBuf mb = { (uint8_t*)payload+cs, len-cs, len-cs, 0 };
     opj_stream_t *st = opj_stream_default_create(OPJ_TRUE);
     opj_stream_set_user_data(st, &mb, NULL);
     opj_stream_set_user_data_length(st, mb.n);

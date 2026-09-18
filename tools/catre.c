@@ -1,4 +1,4 @@
-/* CAT RE v1.6 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.7 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.6"
+#define VERSION "1.7"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0
@@ -40,6 +40,7 @@ int catre_is_image(const char *name);
 uint8_t *catre_encode_image(const uint8_t *data, size_t len, int quality, uint32_t *out_len);
 int catre_decode_image(const uint8_t *payload, uint32_t len, const char *out_path);
 int catre_verify_image(const uint8_t *payload, uint32_t len);
+long catre_find_codestream(const uint8_t *payload, uint32_t len);
 #define CODEC_IMAGE 1
 #define CODEC_OLE2  2
 /* codecs we recognize but can't always decode (proprietary to the original engine) */
@@ -231,6 +232,22 @@ static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_
  * it keeps the office-ps payload scan from trying to inflate at random offsets. */
 static int zlib_hdr_at(const uint8_t *p){
     return p[0]==0x78 && ((p[0]<<8 | p[1]) % 31)==0;
+}
+
+/* Several of the engine's structural codecs (office per-stream, PdfProc) have a mode
+ * that simply stores the WHOLE original file as one zlib stream inside their payload.
+ * Measured: a .doc and a .pdf both come back byte-exact that way. Scan the payload for
+ * a zlib header and accept the inflate only when it yields exactly `orig` bytes.
+ * Returns a malloc'd buffer of `orig` bytes, or NULL when this member is in one of the
+ * opaque modes. */
+static uint8_t *try_wholefile_zlib(const uint8_t *d, size_t len, size_t payoff, uint32_t orig){
+    for (size_t z=payoff; z+2<len; z++){
+        if (!zlib_hdr_at(d+z)) continue;
+        uLongf dn=orig; uint8_t *buf=malloc(dn?dn:1);
+        if (uncompress(buf,&dn,d+z,(uLong)(len-z))==Z_OK && dn==orig) return buf;
+        free(buf);
+    }
+    return NULL;
 }
 
 static uint8_t *inflate_mem(const uint8_t *src, uint32_t comp, uint32_t orig){
@@ -450,24 +467,20 @@ static int cmd_extract(int argc, char **argv){
          * zlib stream — that one is lossless and we decode it here. The other two (an
          * intermediate structural model, and the non-deflate sparse-XLS body) are
          * opaque, so those members are skipped. */
-        if (mem[i].codec==CODEC_OFFICE_PS){
-            uint8_t *whole=NULL;
-            for (size_t z=mem[i].payoff; z+2<len; z++){          /* scan payload for a zlib stream */
-                if (!zlib_hdr_at(d+z)) continue;
-                uLongf dn=mem[i].orig; uint8_t *buf=malloc(dn?dn:1);
-                if (uncompress(buf,&dn,d+z,(uLong)(len-z))==Z_OK && dn==mem[i].orig){ whole=buf; break; }
-                free(buf);
-            }
+        if (mem[i].codec==CODEC_OFFICE_PS || mem[i].codec==CODEC_PDF){
+            uint8_t *whole=try_wholefile_zlib(d,len,mem[i].payoff,mem[i].orig);
             if (whole){
                 snprintf(target,sizeof target,"%s/%s",out,mem[i].name); mkdirs(target);
                 FILE *f=fopen(target,"wb");
                 if(f){ fwrite(whole,1,mem[i].orig,f); fclose(f); done++; prog+=mem[i].orig;
-                       if(verbose){ bar_clear(); printf("  -> %-36s (office whole-file)\n",mem[i].name); } }
+                       if(verbose){ bar_clear(); printf("  -> %-36s (%s whole-file)\n",
+                                                        mem[i].name, codec_name(mem[i].codec)); } }
                 free(whole); continue;
             }
             bar_clear();
-            fprintf(stderr,"  SKIP %s: office per-stream in a structural/sparse mode "
-                           "— needs the original Choshuku engine\n", mem[i].name);
+            fprintf(stderr,"  SKIP %s: %s in a structural mode — needs the original "
+                           "Choshuku engine (which does not restore it byte-exact either)\n",
+                    mem[i].name, codec_name(mem[i].codec));
             skipped++; continue;
         }
         if (!codec_decodable(mem[i].codec)){     /* proprietary codec — needs the original engine */
@@ -480,10 +493,9 @@ static int cmd_extract(int argc, char **argv){
             skipped++; continue;
         }
         if (mem[i].codec==CODEC_IMAGE){          /* JPEG2000 -> decode to PNG */
-            /* the codestream must follow the 26-byte wrapper; if the SOC marker is
-             * missing this is not JPEG2000 after all — skip instead of "FAILED". */
-            size_t cs=mem[i].payoff+26;
-            if (cs+2>len || d[cs]!=0xFF || d[cs+1]!=0x4F){
+            /* find the codestream (it is not always right after the 26-byte wrapper:
+             * an alpha channel is stored before it). No codestream -> not JPEG2000. */
+            if (catre_find_codestream(d+mem[i].payoff, (uint32_t)(len-mem[i].payoff)) < 0){
                 bar_clear();
                 fprintf(stderr,"  SKIP %s: image member without a JPEG2000 codestream "
                                "(engine image codec) — cannot decode\n", mem[i].name);
@@ -595,14 +607,9 @@ static int cmd_test(int argc, char **argv){
         int good;
         if (c==CODEC_IMAGE){                    /* decode the J2K codestream, discard pixels */
             good = catre_verify_image(d+mem[i].payoff, (uint32_t)(len-mem[i].payoff));
-        } else if (c==CODEC_OFFICE_PS){         /* only the whole-file mode is verifiable */
-            good=0;
-            for (size_t z=mem[i].payoff; z+2<len && !good; z++){
-                if (!zlib_hdr_at(d+z)) continue;
-                uLongf dn=mem[i].orig; uint8_t *buf=malloc(dn?dn:1);
-                if (uncompress(buf,&dn,d+z,(uLong)(len-z))==Z_OK && dn==mem[i].orig) good=1;
-                free(buf);
-            }
+        } else if (c==CODEC_OFFICE_PS || c==CODEC_PDF){   /* only the whole-file mode verifies */
+            uint8_t *whole=try_wholefile_zlib(d,len,mem[i].payoff,mem[i].orig);
+            good = whole!=NULL; free(whole);
             if (!good){                         /* structural/sparse mode: opaque, not verifiable */
                 skip++; if(verbose)printf("  SKIP %s (%s — not verifiable)\n",mem[i].name,codec_name(c));
                 continue;

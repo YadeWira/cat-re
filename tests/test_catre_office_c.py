@@ -58,7 +58,7 @@ def test_office_per_stream_opaque_mode_is_skipped_not_failed(tmp_path):
     out = tmp_path / "out"
     r = _run("extract", arc, "-o", str(out), "--no-progress")
     assert r.returncode == 0
-    assert "SKIP" in r.stderr and "office per-stream" in r.stderr
+    assert "SKIP" in r.stderr and "office-ps" in r.stderr
 
 
 def test_test_command_decodes_and_reports_ok():
@@ -91,3 +91,24 @@ def test_test_command_skips_what_it_cannot_decode():
     assert "SKIP" in r.stdout
     assert "1 skipped" in r.stdout
     assert "0 OK" in r.stdout
+
+
+def test_pdf_wholefile_extracts_bit_exact(tmp_path):
+    """PdfProc has a whole-file zlib mode too, and it is byte-exact (v1.7).
+
+    Measured against the engine: of the PDFs it compresses, the ones it can restore
+    exactly are exactly the ones in this mode — for the rest, the ORIGINAL software
+    does not return the input either (it re-encodes the document). So decoding this
+    mode closes the gap for everything that is recoverable at all.
+
+    The fixture is engine-made: a 426-byte PDF, its .qcf is 357 bytes.
+    """
+    arc = os.path.join(QCF_FIX, "pdf_wholefile.pdf.qcf")
+    out = tmp_path / "out"
+    r = _run("extract", arc, "-o", str(out), "--no-progress")
+    assert r.returncode == 0, r.stderr
+    got = out / "v14.pdf"
+    assert got.is_file(), r.stdout + r.stderr
+    with open(os.path.join(QCF_FIX, "pdf_wholefile.pdf"), "rb") as f:
+        assert got.read_bytes() == f.read()
+    assert _run("test", arc, "-v").returncode == 0

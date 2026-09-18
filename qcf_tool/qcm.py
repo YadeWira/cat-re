@@ -131,7 +131,7 @@ class QcmMember:
         office-ps is a maybe: one of its modes is plain zlib of the whole file, so
         that one *is* decodable — `extract` finds out by trying.
         """
-        return self.codec in (CODEC_DEFLATE, CODEC_IMAGE, CODEC_OLE2, CODEC_OFFICE_PS)
+        return self.codec in (CODEC_DEFLATE, CODEC_IMAGE, CODEC_OLE2, CODEC_OFFICE_PS, CODEC_PDF)
 
     def extract(self) -> bytes:
         """Return the decompressed member bytes.
@@ -153,13 +153,13 @@ class QcmMember:
                 return zlib.decompress(self._payload[36:])
             except zlib.error as e:
                 raise QcmError(f"office inflate failed: {e}") from e
-        if self.codec == CODEC_OFFICE_PS:
-            whole = self._office_ps_wholefile()
+        if self.codec in (CODEC_OFFICE_PS, CODEC_PDF):
+            whole = self._wholefile_zlib()
             if whole is not None:
                 return whole
             raise QcmOpaqueCodec(
-                f"{self.name}: office per-stream in a structural/sparse mode "
-                "— needs the original Choshuku engine")
+                f"{self.name}: {self.codec_name} in a structural mode — needs the original "
+                "Choshuku engine (which does not restore it byte-exact either)")
         if self.codec == CODEC_LEAD:
             raise QcmOpaqueCodec(
                 f"{self.name}: LEAD CMP/CMW (third-party) — needs the original Choshuku engine")
@@ -167,18 +167,16 @@ class QcmMember:
             raise QcmOpaqueCodec(
                 f"{self.name}: image member without a JPEG2000 codestream (engine image "
                 "codec) — needs the original Choshuku engine")
-        if self.codec == CODEC_PDF:
-            raise QcmOpaqueCodec(
-                f"{self.name}: PdfProc structural payload — needs the original Choshuku engine")
         # Image: hand back the raw inner codestream for an OpenJPEG-capable caller.
         return self._payload
 
-    def _office_ps_wholefile(self) -> bytes | None:
-        """Decode the LOSSLESS mode of office-ps, or None if this isn't that mode.
+    def _wholefile_zlib(self) -> bytes | None:
+        """Decode the whole-file mode of a structural codec, or None if not that mode.
 
-        That mode stores the entire original file as one zlib stream somewhere in
-        the payload, so we scan for a zlib header and accept the inflate only when
-        it yields exactly `original_size` bytes (docs/QCF_FORMAT_SPEC.md §5).
+        Both the office per-stream codec and PdfProc have a mode that stores the entire
+        original file as one zlib stream inside their payload, so we scan for a zlib
+        header and accept the inflate only when it yields exactly `original_size` bytes
+        (docs/QCF_FORMAT_SPEC.md §5).
         """
         pay = self._payload
         for z in range(len(pay) - 1):

@@ -509,3 +509,69 @@ contra la del **propio motor** del mismo `.qcf` (`OLD/resultados-jpg-test/recupe
 3. **`+0x1A` separa PDF (0x05) de office (0x02)**: los members de `PdfProc` se etiquetaban
    `office-ps`. Su payload es estructural (`32 01 78 …`), no `zlib(archivo)` — o sea que el
    camino PDF del motor **no es** "deflate del archivo" como decía la tabla vieja.
+
+## 11. El techo de fidelidad del MOTOR (2026-09-18) — qué es recuperable *en absoluto*
+
+La pregunta útil no es "¿cuánto decodificamos?" sino "¿cuánto es recuperable?". Para eso hay
+que medir al motor contra sí mismo: comprimir con el motor y **descomprimir con el motor**
+(`sfa.exe` → `dec.exe`), y comparar con el original. Todo lo que el motor no devuelve idéntico
+es irrecuperable por definición — ningún clon puede superarlo.
+
+### Office: 31 archivos reales (doc/xls/ppt del corpus)
+
+| | motor restaura exacto | motor NO restaura exacto |
+|---|:--:|:--:|
+| **`catre` restaura exacto** | **22** | 0 |
+| **`catre` salta** | **0** | **9** |
+
+**Cero huecos reales.** Los 9 que saltamos son precisamente los que el *software original*
+tampoco reproduce: los devuelve re-serializados, con diferencias enormes (medido: `.xls` de
+66.048 B vuelve como 85.504 B con 58.355 bytes distintos; `.ppt` de 420.352 B vuelve con
+355.328 bytes distintos). No es "compresión con pérdida de detalle": es un **re-encoder de
+documento**. Por tipo: **todos los `.doc` medidos vuelven byte-exactos** (del motor y de
+`catre`); los `.xls`/`.ppt` se reparten entre exactos (modo whole-file) y re-encodeados.
+
+> Conclusión operativa: el modo estructural de Office **no vale la pena clonarlo**. Aun con un
+> decodificador perfecto, el resultado sería el documento *alterado* que produce el motor, no el
+> archivo de entrada. Lo recuperable ya está recuperado.
+
+### PDF: hay dos modos y uno SÍ es recuperable ✅ (implementado en v1.7)
+
+`PdfProc` (CodecID 5) tiene el mismo patrón que Office: un **modo whole-file** que guarda
+`zlib(archivo entero)` dentro de su payload — byte-exacto — y un **modo estructural** que el
+motor tampoco restaura. Medido sobre PDFs del corpus: los que el motor devuelve idénticos son
+exactamente los del modo whole-file. `catre` v1.7 los decodifica (581.407 B verificados
+byte-a-byte; fixture chica en `tests/fixtures/real_qcf/pdf_wholefile.pdf.qcf`).
+
+### Imágenes: los códecs opacos son lossy en ambos lados
+
+Los members `image-x` (sub-codec `0x02`: GIF, PNG con paleta/gris) y `lead-cmp` (`0x09`) no los
+decodificamos, pero **el motor tampoco devuelve el archivo original** en ninguno de los casos
+medidos: son recompresiones con pérdida. El hueco ahí es funcional (nosotros no mostramos nada,
+el motor muestra una imagen degradada), no de fidelidad.
+
+### Tabla de dispatch — declarada en el REGISTRO, no inferida ✅
+
+`IMGCMP.dll` busca los codecs en `HKLM\SOFTWARE\QuikCAT\CODEC\1\{CLSID}` (string
+`SOFTWARE\QuikCAT\CODEC\%d\` + el error "Can't find proper decompressor for EngineID=%i").
+El árbol registrado declara la asignación formato→codec:
+
+| CodecID | DLL | clase | extensiones declaradas (`Developer Defined Internal Type`) |
+|:--:|---|---|---|
+| **2** | `MSOC21.dll` | QuikCAT MSOffice Document Compression Class v.2.1 | doc(9) xls(10) ppt(11) |
+| **4** | `CODEC4.dll` | QuikCAT Image Compression Class v.4.0 | bmp(1) gif(3) jpeg/jpg(4) png(6) txt(7) htm/html(8) tif(12) |
+| **5** | `PdfProc.dll` | CAT PDF Document Compression Class | pdf(21) |
+
+Y el byte **`inner+0x1A` del header QCF es ese CodecID** (2 office, 4 CODEC4, 5 PDF) —
+lo que confirma por dato declarado lo que habíamos medido empíricamente. `CODEC4` contiene
+**Kakadu estático** (símbolos `kdu_*`) y carga dinámicamente **los filtros LEADTOOLS**
+(`lfbmp13n`, `lfgif13n`, `Lfpng13n`, `LFCMP13n`, `ltkrn13n`…), que es donde viven los
+sub-codecs `0x02` y `0x09`.
+
+### Bloque alfa en members de imagen ✅ (soportado en v1.7)
+
+Un PNG **RGBA** produce un member de imagen donde el codestream J2K **no** empieza en
+`payload+26`: el motor guarda antes el canal alfa en un bloque propio (medido: 35.859 B para
+800×600), con la misma pinta de coder que el payload `0x09`. `catre` localiza ahora el
+codestream buscando `FF4F FF51` y validando `Xsiz/Ysiz` contra el wrapper: recupera la imagen
+(34,5 dB), no la transparencia.

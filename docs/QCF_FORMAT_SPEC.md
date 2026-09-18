@@ -91,8 +91,10 @@ Comprimiendo un corpus con el motor original bajo Wine y leyendo `inner+0x18/19/
 - **`+0x19` es el sub-codec de imagen**, no un byte de relleno: solo `0x01` trae codestream
   JPEG2000. Leer un member `0x02`/`0x09` como J2K produce basura (era un "FAILED decode"
   hasta v1.6).
-- **`+0x1A` es la familia de stream**: `04` deflate, `02` office, `05` PDF. Es lo que separa
-  un member de PdfProc de uno de MSOC21 (ambos empiezan con `32 01`).
+- **`+0x1A` es el `CodecID` del registro** (`HKLM\SOFTWARE\QuikCAT\CODEC\1\{CLSID}`):
+  `02`=MSOC21 (office), `04`=CODEC4 (imagen y deflate genérico), `05`=PdfProc. Es lo que separa
+  un member de PdfProc de uno de MSOC21 (ambos empiezan con `32 01`). La tabla completa
+  formato→codec está **declarada en el registro**, ver `RE_verified.md` §11.
 - **Pendiente**: la elección entre `0x01` y `0x09` para PNG RGB **no está explicada**. Con el
   mismo contenido, `.bmp` siempre va a J2K, pero un PNG RGB pequeño y de poca entropía fue a
   `0x09` mientras una foto PNG del mismo tamaño fue a J2K. No es el tamaño ni el color-type
@@ -175,6 +177,24 @@ El codec Office tiene **dos variantes** de payload:
   `MSOC21.dll`: `FUN_10068200` (wrapper inflate 1.1.3).
 - (Corrige una nota previa que decía que per-stream era *siempre* un re-encoder lossy: el modo 1 es
   whole-file lossless y sí se decodifica.)
+
+### PDF (`PdfProc`, CodecID 5) — dos modos, uno decodificable ✅ implementado
+
+Igual que Office: cabecera `32 01 XX 00 00 00` + índice `[u16 tag][u32 size]` + marcador
+`04 0a` + cuerpo. Dos modos:
+1. **whole-file zlib (LOSSLESS)** ✅ — el payload contiene `zlib(archivo PDF entero)`;
+   `catre` v1.7 lo infla y verifica contra el tamaño original (probado byte-exacto con un PDF
+   de 581.407 B; fixture `tests/fixtures/real_qcf/pdf_wholefile.pdf.qcf`).
+2. **estructural** — cuerpo con coder propio (no zlib ni deflate crudo). **Fuera de alcance, y
+   sin valor**: medido, el motor tampoco restaura esos PDF byte-exactos (§11 de RE_verified).
+
+### Bloque alfa en members de imagen ✅
+
+Si la imagen de origen tiene canal alfa (PNG RGBA), el motor guarda el alfa en un bloque propio
+**entre el wrapper de 26 B y el codestream J2K** (medido: 35.859 B en un 800×600). Para leer
+estos members hay que **buscar** `FF4F FF51` y validar `Xsiz/Ysiz` contra el ancho/alto del
+wrapper, no asumir que el codestream empieza en `payload+26`. El bloque alfa usa un coder no
+descifrado: se recupera la imagen, no la transparencia.
 
 ### Office (ratios reales medidos) ✅
 `.doc`/`.xls`/`.ppt` reales → **~7-26% del original** (ahorro 74-93%). Excelente por la redundancia
