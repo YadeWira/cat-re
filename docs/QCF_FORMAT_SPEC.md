@@ -266,3 +266,34 @@ La spec del camino deflate está **probada produciendo `.qcf` válidos**:
 | Office per-stream (MSOC21 formato B) | 🟡 modo whole-file lossless ✅ decodificado (v1.5); modos estructural y `.xls` disperso ❌ opacos |
 | LFC (LEADTOOLS) | fuera de alcance (IP de terceros, médico) |
 | Shell/preview handlers, constante Kakadu | bajo valor / no hecho |
+
+### Cómo elige el motor el códec de imagen — datos medidos (2026-09-18)
+
+Barrido con imágenes sintéticas de 160×160, variando colores y entropía, leyendo
+`inner+0x18/0x19` de lo que produce el motor:
+
+| Entrada | colores | tamaño PNG | `+18 +19` | códec | ¿byte-exacto para nosotros? |
+|---|--:|--:|:--:|---|:--:|
+| PNG RGB ruido | 2–64 | 0,3–1 KB | `00 05` | **DEFLATE** | **SÍ** ✅ |
+| PNG RGB ruido | 96–1024 | 2–5 KB | `01 09` | LEAD | no (lossy en ambos lados) |
+| PNG RGB ruido | ≥2048 | ≥9 KB | `01 01` | JPEG2000 | no (lossy) |
+| PNG RGB degradado suave | 25.600 | 1,1 KB | `01 09` | LEAD | no |
+| PNG con paleta ≥251 / gris 8-bit | — | — | `01 02` | sub-codec 0x02 | no |
+| PNG con paleta 16 / 1-bit | — | — | `01 09` | LEAD | no |
+| GIF con paleta | — | — | `01 02` | sub-codec 0x02 | no |
+| BMP RGB (mismos píxeles que el degradado) | 25.600 | — | `01 01` | JPEG2000 | no |
+| TIFF gris | — | — | `01 09` | LEAD | no |
+
+**Lo que estos datos SÍ establecen:**
+1. **Para imágenes muy simples el motor ni usa códec de imagen: las guarda con DEFLATE**, y esas
+   las recuperamos **byte-exactas**. (Antes suponíamos que toda imagen iba a un códec de imagen.)
+2. **No decide por número de colores**: un degradado de 25.600 colores (1,1 KB) va a LEAD y un
+   ruido de 2.048 colores (9,5 KB) va a JPEG2000 → la señal es la **complejidad/compresibilidad**,
+   no la paleta.
+3. **El contenedor de origen también pesa**: los mismos píxeles como BMP van a JPEG2000 y como
+   PNG van a LEAD.
+4. El sub-codec `0x02` aparece con entradas paletadas de ≥251 colores y con grises de 8 bits; el
+   motor las devuelve como GIF/PNG paletados.
+
+**Lo que NO está establecido**: la función de decisión exacta. Vive en `CODEC4`/`IMGCMP`
+(que cargan los filtros LEADTOOLS), y resolverla requiere decompilarla — no más experimentos.
