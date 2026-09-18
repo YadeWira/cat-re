@@ -1,4 +1,4 @@
-/* CAT RE v1.4 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.5 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.4"
+#define VERSION "1.5"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0
@@ -39,10 +39,11 @@
 int catre_is_image(const char *name);
 uint8_t *catre_encode_image(const uint8_t *data, size_t len, int quality, uint32_t *out_len);
 int catre_decode_image(const uint8_t *payload, uint32_t len, const char *out_path);
+int catre_verify_image(const uint8_t *payload, uint32_t len);
 #define CODEC_IMAGE 1
 #define CODEC_OLE2  2
-/* codecs we recognize but can't decode (proprietary to the original engine) */
-#define CODEC_OFFICE_PS 3   /* MSOC21 per-stream: lossy structural re-encoder      */
+/* codecs we recognize but can't always decode (proprietary to the original engine) */
+#define CODEC_OFFICE_PS 3   /* MSOC21 per-stream: multi-mode (see cmd_extract)      */
 #define CODEC_LEAD      4   /* LEAD Technologies CMP/CMW (TIFF/medical), 3rd-party  */
 #define CODEC_UNKNOWN   5
 static const char *codec_name(uint32_t c);
@@ -209,6 +210,13 @@ static int qcm_read(const uint8_t *d, size_t len, Member *mem, int maxm, uint32_
         m++;
     }
     return m;
+}
+
+/* Does a zlib stream start here? CMF=0x78 (deflate, 32K window) and the FCHECK
+ * rule from RFC 1950: the 16-bit CMF/FLG pair must be a multiple of 31. Cheap, and
+ * it keeps the office-ps payload scan from trying to inflate at random offsets. */
+static int zlib_hdr_at(const uint8_t *p){
+    return p[0]==0x78 && ((p[0]<<8 | p[1]) % 31)==0;
 }
 
 static uint8_t *inflate_mem(const uint8_t *src, uint32_t comp, uint32_t orig){
@@ -423,11 +431,35 @@ static int cmd_extract(int argc, char **argv){
     for (int i=0;i<n;i++){
         bar("Extracting", prog, total_out, i, n, mem[i].name);
         char target[2300];
+        /* office-ps (per-stream) is not one format: the engine picks among several
+         * modes per document. One of them stores the WHOLE original file as a single
+         * zlib stream — that one is lossless and we decode it here. The other two (an
+         * intermediate structural model, and the non-deflate sparse-XLS body) are
+         * opaque, so those members are skipped. */
+        if (mem[i].codec==CODEC_OFFICE_PS){
+            uint8_t *whole=NULL;
+            for (size_t z=mem[i].payoff; z+2<len; z++){          /* scan payload for a zlib stream */
+                if (!zlib_hdr_at(d+z)) continue;
+                uLongf dn=mem[i].orig; uint8_t *buf=malloc(dn?dn:1);
+                if (uncompress(buf,&dn,d+z,(uLong)(len-z))==Z_OK && dn==mem[i].orig){ whole=buf; break; }
+                free(buf);
+            }
+            if (whole){
+                snprintf(target,sizeof target,"%s/%s",out,mem[i].name); mkdirs(target);
+                FILE *f=fopen(target,"wb");
+                if(f){ fwrite(whole,1,mem[i].orig,f); fclose(f); done++; prog+=mem[i].orig;
+                       if(verbose){ bar_clear(); printf("  -> %-36s (office whole-file)\n",mem[i].name); } }
+                free(whole); continue;
+            }
+            bar_clear();
+            fprintf(stderr,"  SKIP %s: office per-stream in a structural/sparse mode "
+                           "— needs the original Choshuku engine\n", mem[i].name);
+            skipped++; continue;
+        }
         if (!codec_decodable(mem[i].codec)){     /* proprietary codec — needs the original engine */
             bar_clear();
             fprintf(stderr,"  SKIP %s: codec '%s' needs the original Choshuku engine "
                            "(%s) — cannot decode\n", mem[i].name, codec_name(mem[i].codec),
-                    mem[i].codec==CODEC_OFFICE_PS ? "lossy Office structural re-encoder" :
                     mem[i].codec==CODEC_LEAD ? "LEAD CMP/CMW, third-party" : "unsupported");
             skipped++; continue;
         }
@@ -488,8 +520,13 @@ static int cmd_list(int argc, char **argv){
     if (verbose) printf("%11s %11s %7s  %-9s %-19s name\n","size","packed","ratio","codec","modified");
     for (int i=0;i<n;i++){
         if (verbose){ char dts[32]; dos_str(mem[i].dt,dts);
-            double r=mem[i].orig?100.0*mem[i].comp/mem[i].orig:0;
-            printf("%11u %11u %6.1f%%  %-9s %-19s %s\n",mem[i].orig,mem[i].comp,r,codec_name(mem[i].codec),dts,mem[i].name);
+            if (!mem[i].comp){   /* opaque codec: the packed size isn't computable — don't print 0 */
+                printf("%11u %11s %7s  %-9s %-19s %s\n",mem[i].orig,"?","?",
+                       codec_name(mem[i].codec),dts,mem[i].name);
+            } else {
+                double r=mem[i].orig?100.0*mem[i].comp/mem[i].orig:0;
+                printf("%11u %11u %6.1f%%  %-9s %-19s %s\n",mem[i].orig,mem[i].comp,r,codec_name(mem[i].codec),dts,mem[i].name);
+            }
         } else printf("  %s\n",mem[i].name);
     }
     free(d); return 0;
@@ -524,15 +561,39 @@ static int cmd_test(int argc, char **argv){
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
     static Member mem[MAXMEM]; int n=qcm_read(d,len,mem,MAXMEM,NULL);
     if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); return 1; }
-    int ok=0,bad=0;
+    int ok=0,bad=0,skip=0;
     for(int i=0;i<n;i++){
-        int good=1;
-        if (mem[i].codec==CODEC_DEFLATE){ uint8_t *x=inflate_mem(d+mem[i].payoff,mem[i].comp,mem[i].orig);
-            good=(x!=NULL); free(x); }
-        if(good){ ok++; if(verbose)printf("  OK: %s\n",mem[i].name); }
-        else { bad++; printf("  FAILED: %s\n",mem[i].name); }
+        uint32_t c=mem[i].codec;
+        /* Every member we claim to support is really DECODED here — reporting OK for
+         * a member we never touched would make `test` useless (it did, before v1.5). */
+        int good;
+        if (c==CODEC_IMAGE){                    /* decode the J2K codestream, discard pixels */
+            good = catre_verify_image(d+mem[i].payoff, (uint32_t)(len-mem[i].payoff));
+        } else if (c==CODEC_OFFICE_PS){         /* only the whole-file mode is verifiable */
+            good=0;
+            for (size_t z=mem[i].payoff; z+2<len && !good; z++){
+                if (!zlib_hdr_at(d+z)) continue;
+                uLongf dn=mem[i].orig; uint8_t *buf=malloc(dn?dn:1);
+                if (uncompress(buf,&dn,d+z,(uLong)(len-z))==Z_OK && dn==mem[i].orig) good=1;
+                free(buf);
+            }
+            if (!good){                         /* structural/sparse mode: opaque, not verifiable */
+                skip++; if(verbose)printf("  SKIP %s (%s — not verifiable)\n",mem[i].name,codec_name(c));
+                continue;
+            }
+        } else if (!codec_decodable(c)){        /* proprietary: can't verify without the engine */
+            skip++; if(verbose)printf("  SKIP %s (%s — not verifiable)\n",mem[i].name,codec_name(c));
+            continue;
+        } else {                                /* deflate / office whole-file: inflate + size check */
+            size_t zoff=mem[i].payoff + (c==CODEC_OLE2?36:0);
+            uint32_t zlen=mem[i].comp - (c==CODEC_OLE2?36:0);
+            uint8_t *x=inflate_mem(d+zoff,zlen,mem[i].orig); good=(x!=NULL); free(x);
+        }
+        if(good){ ok++; if(verbose)printf("  OK: %s (%s)\n",mem[i].name,codec_name(c)); }
+        else { bad++; printf("  FAILED: %s (%s)\n",mem[i].name,codec_name(c)); }
     }
-    printf("Tested %d member(s): %d OK, %d failed.\n",ok+bad,ok,bad);
+    if (skip) printf("Tested %d member(s): %d OK, %d failed, %d skipped (proprietary).\n",ok+bad+skip,ok,bad,skip);
+    else      printf("Tested %d member(s): %d OK, %d failed.\n",ok+bad,ok,bad);
     free(d); return bad?1:0;
 }
 

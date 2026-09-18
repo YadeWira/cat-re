@@ -462,6 +462,7 @@ con zlib + OpenJPEG.
 
 1. **Multi-archivo / carpetas**: ver §8.5 — contrato `IQCEnum` resuelto; falta la receta de
    args de `Compress` (decompilar la impl de `CompressFile`).
-2. **Codecs propietarios sin RE interna**: `MSOC21` (MS-OFFCRYP), `PdfProc` (re-deflate de
-   FlateDecode), `LFC`/LEADTOOLS (sin muestras). Difíciles y de bajo valor.
+2. **Codecs propietarios sin RE interna**: `MSOC21` (zlib estándar — el nombre "MS-OFFCRYP"
+   de las notas viejas es falso, ver §9), `PdfProc` (re-deflate de FlateDecode), `LFC`/LEADTOOLS
+   (sin muestras). Difíciles y de bajo valor.
 3. Reimplementar el **encoder** (escribir QCM, no solo leer) en `libcat`/`qcf_tool`.

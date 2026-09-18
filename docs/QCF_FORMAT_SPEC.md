@@ -129,8 +129,9 @@ El codec Office tiene **dos variantes** de payload:
   `[u16 tag][u32 size]` + `[6B 00]` + marcador `04 0a 00 05` + cuerpo. **NO es un solo formato:
   el motor elige entre varios MODOS** según el documento (re-análisis 2026-06-11 con el corpus real):
   1. **whole-file zlib (LOSSLESS)** — un blob `zlib(0x78)` que descomprime al **archivo original
-     byte-exacto**. ✅ **DECODIFICABLE** — el prototipo `nextGEN/catre-ng` lo hace (escanea el zlib del
-     payload, infla, verifica == tamaño original). Es la MINORÍA (docs `.doc` simples).
+     byte-exacto**. ✅ **DECODIFICADO desde v1.5** — tanto el `catre` oficial como el front-end
+     Python escanean el zlib del payload, inflan y verifican `== tamaño original`. Es la MINORÍA
+     (docs `.doc` simples); fixture de regresión: `tests/fixtures/real_office/Bug49919.doc.qcf`.
   2. **modelo estructural** — varios blobs zlib cuyo contenido (`01 00 09 00 00 03 …`) es una
      representación intermedia del doc (NO los streams OLE2), que el motor reconstruye al descomprimir.
      Ej.: .doc 58 KB con objetos embebidos → 7 tags, 3 blobs (~12 KB) que no reconstruyen solos.
@@ -209,5 +210,6 @@ La spec del camino deflate está **probada produciendo `.qcf` válidos**:
 | Codecs (zlib + JPEG2000) | ✅ ~100% (estándar, reproducibles) |
 | API COM compress/decompress | ✅ funcional |
 | Multi-archivo | ✅ **100%** — reverseado, leído, escrito y validado (muestra real de 5 archivos) |
+| Office per-stream (MSOC21 formato B) | 🟡 modo whole-file lossless ✅ decodificado (v1.5); modos estructural y `.xls` disperso ❌ opacos |
 | LFC (LEADTOOLS) | fuera de alcance (IP de terceros, médico) |
 | Shell/preview handlers, constante Kakadu | bajo valor / no hecho |

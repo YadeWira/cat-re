@@ -161,3 +161,26 @@ int catre_decode_image(const uint8_t *payload, uint32_t len, const char *out_pat
     opj_destroy_codec(cod); opj_stream_destroy(st);
     return ok;
 }
+
+/* Verify an image member: decode the J2K codestream and throw the pixels away.
+ * Used by `catre test`, which must not report OK for a member it never decoded. */
+int catre_verify_image(const uint8_t *payload, uint32_t len){
+    if (len <= 26) return 0;
+    MemBuf mb = { (uint8_t*)payload+26, len-26, len-26, 0 };
+    opj_stream_t *st = opj_stream_default_create(OPJ_TRUE);
+    opj_stream_set_user_data(st, &mb, NULL);
+    opj_stream_set_user_data_length(st, mb.n);
+    opj_stream_set_read_function(st, mem_read);
+    opj_stream_set_skip_function(st, mem_skip);
+    opj_stream_set_seek_function(st, mem_seek);
+    opj_codec_t *cod = opj_create_decompress(OPJ_CODEC_J2K);
+    opj_set_warning_handler(cod, quiet, NULL);
+    opj_set_error_handler(cod, quiet, NULL);
+    opj_dparameters_t dp; opj_set_default_decoder_parameters(&dp);
+    opj_image_t *img=NULL; int ok=0;
+    if (opj_setup_decoder(cod,&dp) && opj_read_header(st,cod,&img) &&
+        opj_decode(cod,st,img) && opj_end_decompress(cod,st)) ok=1;
+    if (img) opj_image_destroy(img);
+    opj_destroy_codec(cod); opj_stream_destroy(st);
+    return ok;
+}

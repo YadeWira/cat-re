@@ -45,7 +45,8 @@ Config fija (Part-1, 1 tile, RGB, MCT on, 5 niveles, 2 layers, LRCP) con wrapper
 
 ## Qué falta para el 100% (todo deep-dig o bajo valor)
 1. Multi-archivo: trazar el switch de DISPID en `Invoke` (`0x10001cb0`) → receta de `Compress`.
-2. Internos de codecs propietarios: `MSOC21` (MS-OFFCRYP), `PdfProc`, `LFC`/LEADTOOLS.
+2. Internos de codecs propietarios: `MSOC21` (ver abajo: es zlib estándar, NO "MS-OFFCRYP"),
+   `PdfProc`, `LFC`/LEADTOOLS.
 3. Reimplementar el **encoder** QCM en `libcat`/`qcf_tool` (ahora hay muestras reales para validar).
 
 ---

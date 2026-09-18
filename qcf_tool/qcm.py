@@ -45,8 +45,12 @@ MAGIC_QCF = b"QCF\x01"
 CODEC_DEFLATE = 0   # text / generic binary -> zlib
 CODEC_IMAGE = 1     # images -> JPEG2000 codestream (CODEC4)
 CODEC_OLE2 = 2      # Office/OLE2 -> MSOC21 (36-byte header + zlib of whole compound file)
+# Codecs we recognize but cannot always decode (the original engine's own):
+CODEC_OFFICE_PS = 3  # MSOC21 per-stream: multi-mode, only its whole-file mode is decodable
+CODEC_LEAD = 4       # LEAD Technologies CMP/CMW (TIFF / medical) — third-party, opaque
 
-_CODEC_NAMES = {CODEC_DEFLATE: "deflate", CODEC_IMAGE: "image-jp2", CODEC_OLE2: "office"}
+_CODEC_NAMES = {CODEC_DEFLATE: "deflate", CODEC_IMAGE: "image-jp2", CODEC_OLE2: "office",
+                CODEC_OFFICE_PS: "office-ps", CODEC_LEAD: "lead-cmp"}
 
 # MSOC21 whole-file header tail (engine wants it present & non-zero; not content-validated)
 _MSOC_TAIL = bytes.fromhex("def90b45711be40046cb1fe33400")
@@ -54,6 +58,35 @@ _MSOC_TAIL = bytes.fromhex("def90b45711be40046cb1fe33400")
 
 class QcmError(ValueError):
     pass
+
+
+class QcmOpaqueCodec(QcmError):
+    """The member uses a codec only the original engine can decode.
+
+    Raised instead of a confusing zlib error, so callers can skip the member and
+    carry on with the rest of the archive (that is what `catre extract` does).
+    """
+
+
+def classify_codec(data: bytes, hdr: int) -> int:
+    """Codec of the member whose 28-byte QCF header starts at `hdr`.
+
+    Mirrors the C tool (tools/catre.c `classify_codec`): the codec byte at +0x18
+    distinguishes image from stream, +0x19 == 0x09 marks LEAD, and an MSOC21
+    office payload is told apart by its header: `32 01 12 00` = whole-file
+    (decodable), any other `32 01 xx 00` = per-stream.
+    """
+    if hdr + 0x1C > len(data):
+        return CODEC_DEFLATE
+    c0, c1, ext = data[hdr + 0x18], data[hdr + 0x19], data[hdr + 0x1B]
+    pay = hdr + 0x1C + ext
+    if c0 == 0x01 and c1 == 0x09:
+        return CODEC_LEAD
+    if c0 == 0x01:
+        return CODEC_IMAGE
+    if data[pay:pay + 2] == b"\x32\x01":
+        return CODEC_OLE2 if data[pay:pay + 4] == b"\x32\x01\x12\x00" else CODEC_OFFICE_PS
+    return CODEC_DEFLATE
 
 
 def dos_datetime_to_tuple(dt: int) -> tuple[int, int, int, int, int, int]:
@@ -84,12 +117,23 @@ class QcmMember:
     def codec_name(self) -> str:
         return _CODEC_NAMES.get(self.codec, f"codec{self.codec}")
 
+    @property
+    def decodable(self) -> bool:
+        """False for members only the original engine can decode.
+
+        office-ps is a maybe: one of its modes is plain zlib of the whole file, so
+        that one *is* decodable — `extract` finds out by trying.
+        """
+        return self.codec in (CODEC_DEFLATE, CODEC_IMAGE, CODEC_OLE2, CODEC_OFFICE_PS)
+
     def extract(self) -> bytes:
         """Return the decompressed member bytes.
 
         Deflate members are inflated with zlib (lossless, verified). Image
         members carry a JPEG2000 codestream — we return it as-is so a caller
         with OpenJPEG (the jp2 backend) can decode it; raising would lose data.
+        Members in a codec we cannot decode raise `QcmOpaqueCodec` so the caller
+        can skip them instead of dying on a bogus zlib error.
         """
         if self.codec == CODEC_DEFLATE:
             try:
@@ -102,8 +146,39 @@ class QcmMember:
                 return zlib.decompress(self._payload[36:])
             except zlib.error as e:
                 raise QcmError(f"office inflate failed: {e}") from e
-        # Non-deflate (image/other): hand back the raw inner codestream.
+        if self.codec == CODEC_OFFICE_PS:
+            whole = self._office_ps_wholefile()
+            if whole is not None:
+                return whole
+            raise QcmOpaqueCodec(
+                f"{self.name}: office per-stream in a structural/sparse mode "
+                "— needs the original Choshuku engine")
+        if self.codec == CODEC_LEAD:
+            raise QcmOpaqueCodec(
+                f"{self.name}: LEAD CMP/CMW (third-party) — needs the original Choshuku engine")
+        # Image: hand back the raw inner codestream for an OpenJPEG-capable caller.
         return self._payload
+
+    def _office_ps_wholefile(self) -> bytes | None:
+        """Decode the LOSSLESS mode of office-ps, or None if this isn't that mode.
+
+        That mode stores the entire original file as one zlib stream somewhere in
+        the payload, so we scan for a zlib header and accept the inflate only when
+        it yields exactly `original_size` bytes (docs/QCF_FORMAT_SPEC.md §5).
+        """
+        pay = self._payload
+        for z in range(len(pay) - 1):
+            # zlib header: CMF 0x78 (deflate, 32K window) + the RFC 1950 FCHECK rule
+            # (the CMF/FLG pair is a multiple of 31). Keeps us from inflating noise.
+            if pay[z] != 0x78 or ((pay[z] << 8) | pay[z + 1]) % 31:
+                continue
+            try:
+                out = zlib.decompressobj().decompress(pay[z:], self.original_size + 1)
+            except zlib.error:
+                continue
+            if len(out) == self.original_size:
+                return out
+        return None
 
 
 def build_qcm_deflate(raw: bytes, name: str, dos_datetime: int = 0x5CCA22A4) -> bytes:
@@ -240,17 +315,21 @@ class QcmArchive:
             if data[hdr:hdr + 4] != MAGIC_QCF:
                 break                          # reached the central directory
             comp_size = struct.unpack_from("<I", data, hdr + 0x08)[0]
-            codec = data[hdr + 0x18]
             ext_size = data[hdr + 0x1B]
             payload_off = hdr + 0x1C + ext_size
+            codec = classify_codec(data, hdr)
             # MSOC21 whole-file office member: comp_size field is 0, real size lives
             # in the 36-byte payload header at +8 (== zlib size); total = 36 + that.
-            if comp_size == 0 and codec == 0 and data[payload_off:payload_off + 4] == b"\x32\x01\x12\x00":
+            if codec == CODEC_OLE2 and comp_size == 0:
                 comp_size = 36 + struct.unpack_from("<I", data, payload_off + 8)[0]
-                codec = CODEC_OLE2
-            payload = data[payload_off:payload_off + comp_size]
-            if len(payload) != comp_size:
-                raise QcmError("truncated member payload")
+            if comp_size:
+                payload = data[payload_off:payload_off + comp_size]
+                if len(payload) != comp_size:
+                    raise QcmError("truncated member payload")
+            else:
+                # Opaque codec (office-ps / LEAD): the header does not tell us the
+                # packed size, so keep the rest of the file and let the codec decide.
+                payload = data[payload_off:]
             streams[hdr - 4] = dict(codec=codec, comp_size=comp_size,
                                     payload_off=payload_off, hdr=hdr, payload=payload)
             off = payload_off + comp_size

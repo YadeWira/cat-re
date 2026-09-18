@@ -137,3 +137,29 @@ def test_reads_real_engine_office_wholefile():
     orig = open(_os.path.join(odir, "wholefile.doc"), "rb").read()
     assert arc.members[0].codec_name == "office"
     assert arc.members[0].extract() == orig
+
+
+def test_reads_real_engine_office_per_stream_wholefile_mode():
+    """office-ps is multi-mode: its whole-file zlib mode decodes byte-exact.
+
+    Before v1.5 the Python reader classified these members as `deflate` and blew
+    up with a zlib error instead of decoding or skipping them.
+    """
+    from qcf_tool.qcm import CODEC_OFFICE_PS
+    odir = _os.path.join(FIX, "..", "real_office")
+    arc = QcmArchive.read(open(_os.path.join(odir, "Bug49919.doc.qcf"), "rb").read())
+    m = arc.members[0]
+    assert m.codec == CODEC_OFFICE_PS and m.codec_name == "office-ps"
+    orig = open(_os.path.join(odir, "Bug49919.doc"), "rb").read()
+    assert m.extract() == orig
+
+
+def test_office_per_stream_opaque_mode_raises_a_clear_error():
+    """The structural/sparse modes stay opaque — a typed error, not a zlib crash."""
+    from qcf_tool.qcm import QcmOpaqueCodec
+    odir = _os.path.join(FIX, "..", "real_office")
+    arc = QcmArchive.read(open(_os.path.join(odir, "SampleSS.xls.qcf"), "rb").read())
+    m = arc.members[0]
+    assert m.codec_name == "office-ps"
+    with pytest.raises(QcmOpaqueCodec):
+        m.extract()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CAT RE v1.4 — pure-Python CLI for Choshuku/CAT `.qcf` files.
+"""CAT RE v1.5 — pure-Python CLI for Choshuku/CAT `.qcf` files.
 
 A free, reverse-engineered reimplementation of the Choshuku Professional
 (超圧縮 / QuikCAT CAT) `.qcf` container, with no dependency on the original
@@ -20,10 +20,11 @@ import sys
 import time
 
 from .qcm import (
-    QcmArchive, build_qcm_multi, dos_datetime_to_tuple, QcmError,
+    QcmArchive, build_qcm_multi, dos_datetime_to_tuple, QcmError, QcmOpaqueCodec,
+    CODEC_IMAGE,
 )
 
-VERSION = "1.4"
+VERSION = "1.5"
 BANNER = r"""
   ____    _    _____   ____  _____
  / ___|  / \  |_   _| |  _ \| ____|   CAT RE v%s
@@ -95,22 +96,30 @@ def cmd_compress(args):
 def cmd_extract(args):
     arc = QcmArchive.read(open(args.archive, "rb").read())
     os.makedirs(args.output, exist_ok=True)
-    n = 0
+    n = skipped = 0
     for m in arc.members:
         if args.members and m.name not in args.members:
             continue
-        data = m.extract()
+        try:
+            data = m.extract()
+        except QcmOpaqueCodec as e:
+            # A codec only the original engine can decode. Skip this member and
+            # keep going — one opaque member must not sink the whole archive.
+            print(f"  SKIP {e}", file=sys.stderr)
+            skipped += 1
+            continue
         # image members come back as a raw JP2 codestream
-        name = m.name if m.codec == 0 else m.name + ".jp2"
+        name = m.name if m.codec != CODEC_IMAGE else m.name + ".jp2"
         target = os.path.join(args.output, name)
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
         with open(target, "wb") as f:
             f.write(data)
         n += 1
         if args.verbose:
-            kind = "deflate" if m.codec == 0 else "raw JP2 codestream"
+            kind = "raw JP2 codestream" if m.codec == CODEC_IMAGE else m.codec_name
             print(f"  -> {name}  ({_fmt_size(len(data))}, {kind})")
-    print(f"Extracted {n} file(s) to {args.output}/")
+    tail = " — some members skipped (proprietary codec)" if skipped else ""
+    print(f"Extracted {n} file(s) to {args.output}/{tail}")
 
 
 def cmd_list(args):
@@ -122,9 +131,13 @@ def cmd_list(args):
     for m in arc.members:
         if args.verbose:
             y, mo, da, hh, mn, ss = dos_datetime_to_tuple(m.dos_datetime)
-            ratio = m.compressed_size / m.original_size * 100 if m.original_size else 0
             dt = f"{y:04d}-{mo:02d}-{da:02d} {hh:02d}:{mn:02d}:{ss:02d}"
-            print(f"{m.original_size:>11}  {m.compressed_size:>11}  {ratio:>5.1f}%  "
+            if not m.compressed_size:      # opaque codec: packed size isn't computable
+                packed, ratio = "?", "?"
+            else:
+                packed = str(m.compressed_size)
+                ratio = f"{m.compressed_size / m.original_size * 100:.1f}%" if m.original_size else "?"
+            print(f"{m.original_size:>11}  {packed:>11}  {ratio:>6}  "
                   f"{m.codec_name:<9}  {dt:<19}  {m.name}")
         else:
             print(f"  {m.name}")
@@ -150,22 +163,42 @@ def cmd_info(args):
 
 
 def cmd_test(args):
+    """Verify what this front-end can actually decompress; skip the rest.
+
+    A member is only OK when it really inflated to its recorded size. Image
+    members need a JPEG2000 decoder, which the pure-Python front-end does not
+    have — those are reported as skipped (the C `catre` decodes and verifies
+    them), never as OK.
+    """
     arc = QcmArchive.read(open(args.archive, "rb").read())
-    ok = bad = 0
+    ok = bad = skip = 0
     for m in arc.members:
+        if m.codec == CODEC_IMAGE:
+            skip += 1
+            if args.verbose:
+                print(f"  SKIP {m.name} (image-jp2 — needs the C catre to verify)")
+            continue
         try:
             data = m.extract()
-            good = (m.codec != 0) or (len(data) == m.original_size)
+            good = len(data) == m.original_size
+        except QcmOpaqueCodec:
+            skip += 1
+            if args.verbose:
+                print(f"  SKIP {m.name} ({m.codec_name} — not verifiable)")
+            continue
         except Exception:
             good = False
         if good:
             ok += 1
+            if args.verbose:
+                print(f"  OK: {m.name} ({m.codec_name})")
         else:
             bad += 1
-            print(f"  FAILED: {m.name}")
-        if args.verbose and good:
-            print(f"  OK: {m.name}")
-    print(f"Tested {ok + bad} member(s): {ok} OK, {bad} failed.")
+            print(f"  FAILED: {m.name} ({m.codec_name})")
+    if skip:
+        print(f"Tested {ok + bad + skip} member(s): {ok} OK, {bad} failed, {skip} skipped.")
+    else:
+        print(f"Tested {ok + bad} member(s): {ok} OK, {bad} failed.")
     sys.exit(1 if bad else 0)
 
 

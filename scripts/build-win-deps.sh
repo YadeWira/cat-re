@@ -9,10 +9,10 @@
 # Requirements (Debian/Ubuntu):
 #   sudo apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 cmake curl
 #
-# Usage: scripts/build-win-deps.sh [OUTDIR]   (default: /tmp/winbuild)
+# Usage: scripts/build-win-deps.sh [OUTDIR]   (default: ~/.cache/catre-deps/win)
 set -euo pipefail
 
-OUT="${1:-/tmp/winbuild}"
+OUT="${1:-$HOME/.cache/catre-deps/win}"
 ZLIB_VER=1.3.1
 OPJ_VER=2.5.3
 mkdir -p "$OUT"; cd "$OUT"

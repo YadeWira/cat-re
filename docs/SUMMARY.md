@@ -24,7 +24,8 @@ desde el menú contextual del Explorer.
 
 | Input            | Backend DLL  | Algoritmo subyacente              |
 |------------------|--------------|------------------------------------|
-| BMP/GIF/PNG/TIFF | `CODEC4.dll` | JPEG2000 (Kakadu)                  |
+| BMP/GIF/PNG      | `CODEC4.dll` | JPEG2000 (Kakadu)                  |
+| TIFF             | ZipDLL / `LFCMP13n` | **NO va a JPEG2000** (verificado): DEFLATE, o LEAD CMP en grises de alta profundidad |
 | JPEG             | `IMGCMP.dll` | wrapper sobre `CODEC4` (JPG→JP2)    |
 | PDF              | `PdfProc.dll`| Deflate sobre `FlateDecode`         |
 | DOC/XLS/PPT      | `MSOC21.dll` | OLE2 + zlib DEFLATE (NO MS-OFFCRYP — ver RE_verified §9) |
@@ -105,7 +106,7 @@ archive. El enumerador se crea via `EnumerateItems` o se pasa pre-armado.
 - `raw.c` — passthrough, nombre del ext header.
 - `zip.c` — PKZIP STORED + DEFLATE, hand-rolled (zlib).
 - `jp2.c` — JPEG2000 via libopenjp2 (decoder + encoder BMP→JP2).
-- `ole2.c` — MS-CFB (compound file binary) reader, sin MS-OFFCRYP.
+- `ole2.c` — MS-CFB (compound file binary) reader.
 - `jpg.c` — JPEG decoder via libjpeg + path `cat_jpg_to_jp2` (decode→BMP→JP2).
 
 ### `cat-tool` CLI
@@ -173,9 +174,10 @@ calidad.
 - **Encoder JP2 lossy**: faltó añadir un parámetro de bitrate/calidad
   a `cat_encode_jp2_from_bmp`. El encoder es 100% lossless (rate=0,
   irreversible=0), por eso el output es mayor que el JPG.
-- **MS-OFFCRYP deflate**: la compresión propietaria de Office 97-2003
-  (deflate con tablas Huffman custom) no se implementó. Solo el path
-  OLE2 sin comprimir funciona para `.doc`/`.xls`/`.ppt`.
+- ~~**MS-OFFCRYP deflate**~~: **no existe** — era una hipótesis falsa. `MSOC21`
+  usa **zlib 1.1.3 estándar** (RE_verified §9), y el codec Office está
+  implementado: la variante whole-file se escribe y se lee, y del per-stream se
+  decodifica el modo whole-file lossless (ver `QCF_FORMAT_SPEC.md` §5).
 - **LFC (LEADTOOLS)**: formato propietario, sin sample reference.
 - **Suite completa 153 JPGs**: el test procesa cada JPG secuencialmente
   (decode + encode + decode ~2-5s por archivo grande). 153 archivos

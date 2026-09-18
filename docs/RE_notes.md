@@ -3,6 +3,13 @@
 `cat-re` is a reverse-engineering workspace for **Choshuku Professional (超圧縮) v1.0.2**,
 a 2003 Japanese compression utility by SOURCENEXT / QuikCAT Technologies.
 
+> **⚠️ Early notes — partly superseded.** This file is the *first pass*, written from
+> strings and imports before anything was verified against the binaries or against real
+> `.qcf` samples. Two claims here turned out to be wrong and are corrected inline below:
+> Office is **plain zlib 1.1.3**, not a proprietary "MS-OFFCRYP", and **TIFF does not go
+> to JPEG2000**. For what is actually verified, read **`docs/RE_verified.md`** (disassembly
+> with addresses) and **`docs/QCF_FORMAT_SPEC.md`** (the implementable spec).
+
 ## TL;DR
 
 The DLLs are not packed, not obfuscated, and have no anti-debug. The `.qcf`
@@ -41,9 +48,10 @@ extension). Internally each backend is a separate COM DLL loaded by
 | Input type      | Backend DLL        | Underlying algorithm                          |
 |-----------------|--------------------|-----------------------------------------------|
 | BMP / GIF / PNG | `CODEC4.dll`       | JPEG2000 (Kakadu) — wavelet + MQ coder        |
-| / TIFF / JPEG   | `IMGCMP.dll`       | wrapper around CODEC4                         |
+| / JPEG          | `IMGCMP.dll`       | wrapper around CODEC4                         |
+| TIFF            | ZipDLL / `LFCMP13n`| **NOT JPEG2000** (verified): plain DEFLATE, or LEAD CMP for high-bit-depth grayscale |
 | PDF             | `PdfProc.dll`      | parses PDF, applies Deflate to `FlateDecode`  |
-| DOC / XLS / PPT | `MSOC21.dll`       | OLE2 compound storage + Deflate (MS-OFFCRYP)  |
+| DOC / XLS / PPT | `MSOC21.dll`       | OLE2 compound storage + **zlib 1.1.3 DEFLATE** per stream (*not* "MS-OFFCRYP" — see RE_verified §9) |
 | anything else   | `ZipDLL.dll`       | ZIP = Deflate (LZ77 + Huffman)                |
 | medical/image   | `LFCMP13n.DLL`     | LFC (LEADTOOLS filter compression)            |
 
@@ -60,9 +68,11 @@ So the "CAT algorithm" is really four backends plus a dispatcher:
 3. **LFC (LEADTOOLS)** — proprietary `LFCMP13n.DLL` filter format
    (`fltCompressBuffer` / `fltStartCompressBuffer` / `fltGetStamp` etc.).
    Exposed through the standard LEAD filter API.
-4. **OLE2 / MS-OFFCRYP** — Office docs go through `MSOC21.dll`, which is
-   OLE2 compound storage with deflate-compressed streams (the "Office 97+
-   compression" used in `.doc`/`.xls`/`.ppt`).
+4. **OLE2 (MSOC21)** — Office docs go through `MSOC21.dll`, which is OLE2
+   compound storage with **standard zlib 1.1.3** deflate-compressed streams.
+   (An earlier guess called this a proprietary "MS-OFFCRYP" format; that was
+   **wrong** — the crypto-looking strings are the linked Windows HRESULT message
+   table. See `RE_verified.md` §9.)
 
 Auxiliary codecs seen in the LEADTOOLS image DLLs but not used as
 general-purpose compression: LZW (GIF/TIFF), RLE (BMP/FAX).

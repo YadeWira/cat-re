@@ -112,10 +112,12 @@ Result codes are negative on error (`cat_status` enum in `cat.h`).
 | JPEG2000       | `jp2.c`       | JP2 + J2K via libopenjp2              |
 | OLE2/Office    | `ole2.c`      | MS-CFB (compound file binary) reader |
 
-ZIP is fully self-contained — no external dep beyond zlib. OLE2 reader
-walks the directory tree but does not decompress MS-OFFCRYP-compressed
-streams (the deflate variant with custom Huffman tables used by Office
-97-2003). For uncompressed Office files this works.
+ZIP is fully self-contained — no external dep beyond zlib. The OLE2 reader
+walks the directory tree of a compound file; it does not implement the engine's
+Office codec. (An early note claimed Office used a proprietary "MS-OFFCRYP"
+deflate — that was **wrong**: `MSOC21` is standard zlib 1.1.3, see
+`RE_verified.md` §9. The Office codec is implemented in the C `catre`, not in
+this older library.)
 
 ## .qcf format reminder
 
@@ -144,9 +146,9 @@ See [RE_notes.md](RE_notes.md) for the full reverse-engineering notes.
 
 ## What hasn't been tested
 
-- OLE2: needs a real `.doc`/`.xls`/`.ppt` to exercise. The MS-OFFCRYP
-  deflate path is not implemented (would need a custom Huffman-table aware
-  inflate).
+- OLE2: needs a real `.doc`/`.xls`/`.ppt` to exercise. The engine's Office
+  codec (MSOC21 = zlib over OLE2) is not implemented *here* — it lives in the
+  C `catre` (`tools/catre.c`).
 - LFC (LEADTOOLS filter compression): proprietary format, requires a
   reference encoder.
 - Multi-volume QCM files.

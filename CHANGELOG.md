@@ -3,6 +3,40 @@
 All notable changes to **CAT RE** (the native `catre` archiver). Dates are UTC.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.5 — 2026-09-18
+
+### Fixed
+- **`test` now really verifies.** It used to report `OK` for every member it did not
+  inflate — image and Office members passed untouched, so a **corrupted JPEG2000
+  payload was reported as OK**. Each decodable member is now actually decoded
+  (JPEG2000 via OpenJPEG, Office/DEFLATE via zlib); members in a codec we cannot
+  decode are reported as **skipped**, never as OK.
+- **The pure-Python front-end caught up with v1.4.** It classified engine per-stream
+  Office members as `deflate` and died with `Error -5 while decompressing data`
+  instead of identifying them. It now shares the C tool's classification
+  (`office-ps`, `lead-cmp`), skips what it cannot decode, and its `test` no longer
+  passes members it never decompressed.
+- **Reproducible builds.** The build deps lived in `/tmp` (a tmpfs), so they vanished
+  on reboot and `make catre` failed with "openjpeg.h: No such file". They now build
+  into `~/.cache/catre-deps` via `make deps` / `scripts/build-*-deps.sh`, with the
+  system OpenJPEG as a fallback.
+
+### Added
+- **Office per-stream: the whole-file mode is decoded.** That codec is multi-mode; one
+  of its modes stores the original file as a single zlib stream. Those members now
+  extract **byte-exact** (C tool and Python), instead of being skipped wholesale. The
+  structural-model and sparse-XLS modes remain opaque and are skipped with a message.
+- Regression tests for both (suite is now 46), including an engine-made per-stream
+  fixture (`tests/fixtures/real_office/Bug49919.doc.qcf`) and a corrupted-image test
+  that must fail.
+
+### Changed
+- `list` prints `?` instead of `0` / `0.0%` for the packed size of an opaque member,
+  whose size the header does not record.
+- Docs: corrected the two claims the binary analysis had already disproven but that
+  survived in `docs/RE_notes.md` / `docs/SUMMARY.md` — Office is standard **zlib
+  1.1.3**, not a proprietary "MS-OFFCRYP", and **TIFF does not go to JPEG2000**.
+
 ## v1.4 — 2026-06-11
 
 ### Fixed

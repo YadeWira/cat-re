@@ -28,26 +28,48 @@ JPG_RUN_SRC  = tests/c/test_jpg_runner.c
 .PHONY: all test clean
 all: catre $(LIB_SO) $(TOOL_BIN)
 
-# CAT RE v1.0 — native C archiver (QCM single/multi/folders, deflate + JPEG2000).
-# Image codec via OpenJPEG (static) + zlib. OPENJPEG_INC/LIB can be overridden.
-OPENJPEG_INC ?= /tmp/openjpeg/extracted/usr/include/openjpeg-2.5
-OPJ_STATIC   ?= /tmp/openjpeg/extracted/usr/lib/x86_64-linux-gnu/libopenjp2.a
+# CAT RE — native C archiver (QCM single/multi/folders, deflate + JPEG2000).
+# Image codec via OpenJPEG (static) + zlib.
+#
+# Deps live in a PERSISTENT directory (they used to sit in /tmp, which is a tmpfs
+# here: they vanished on reboot and `make catre` broke with "openjpeg.h: No such
+# file"). Build them once with `make deps`; the system OpenJPEG is used as a
+# fallback when it's installed. Override CATRE_DEPS/OPENJPEG_INC/OPJ_STATIC freely.
+CATRE_DEPS   ?= $(HOME)/.cache/catre-deps
+OPENJPEG_INC ?= $(firstword $(wildcard $(CATRE_DEPS)/include/openjpeg-2.5) \
+                            $(wildcard /usr/include/openjpeg-2.5))
+OPJ_STATIC   ?= $(firstword $(wildcard $(CATRE_DEPS)/lib/libopenjp2.a) \
+                            $(wildcard /usr/lib/*/libopenjp2.a))
 CATRE_SRC = tools/catre.c tools/catre_img.c
 CATRE_CFLAGS = -O2 -Wall -std=c11 -D_DEFAULT_SOURCE -I$(OPENJPEG_INC)
 
+.PHONY: deps
+deps:
+	scripts/build-linux-deps.sh $(CATRE_DEPS)
+
+# Fail with an actionable message instead of a confusing compiler error.
+define need_opj
+	@[ -n "$(OPENJPEG_INC)" ] && [ -n "$(OPJ_STATIC)" ] || { \
+	  echo "error: static OpenJPEG not found. Run 'make deps' (builds it into $(CATRE_DEPS))."; \
+	  exit 1; }
+endef
+
 catre: $(CATRE_SRC)
+	$(call need_opj)
 	$(CC) $(CATRE_CFLAGS) -o catre $(CATRE_SRC) $(OPJ_STATIC) -lz -lm
 
 # Fully static, zero-runtime-dependency binary (OpenJPEG + zlib + libc linked in).
 .PHONY: catre-static
 catre-static: $(CATRE_SRC)
+	$(call need_opj)
 	$(CC) $(CATRE_CFLAGS) -static -o catre-static $(CATRE_SRC) $(OPJ_STATIC) -l:libz.a -lm
 	strip catre-static
 	@echo "built catre-static ($$(stat -c%s catre-static) bytes); ldd:"; ldd catre-static 2>&1 | head -1
 
 # ---- Windows cross-builds (mingw-w64) ----
-# Static .exe for Win7+ (x64 and x86). Deps built by scripts/build-win-deps.sh.
-WIN_DEPS   ?= /tmp/winbuild
+# Static .exe for Win7+ (x64 and x86). Deps built by scripts/build-win-deps.sh
+# (into $(CATRE_DEPS)/win — persistent, for the same reason as the Linux deps).
+WIN_DEPS   ?= $(CATRE_DEPS)/win
 WIN64_DEPS ?= $(WIN_DEPS)/out-x64
 WIN32_DEPS ?= $(WIN_DEPS)/out-x86
 WIN_CFLAGS  = -O2 -Wall -std=c11 -D_DEFAULT_SOURCE -DOPJ_STATIC
