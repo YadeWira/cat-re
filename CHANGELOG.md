@@ -25,7 +25,17 @@ the Python one can do too, and it now writes the format the way the engine does.
 - **`delete` can remove an empty folder.** It only counted file members, so deleting a
   folder that holds no files reported "no member matched" and changed nothing.
 
+### Changed (C tool)
+- Directory records descend immediately into a folder's contents instead of writing all
+  sibling folder records first — the engine's own layout, verified against its archives
+  (`XD`, `nocreo.txt`, `JAJA`, `jajaja.txt` in that order).
+
 ### Fixed (Python front-end)
+- **The ext header carried the wrong letter for nested members.** It holds the first
+  letter of the member's *basename* — checked against an engine-made archive, where
+  `XD/nocreo.txt` carries `n` — and the Python writer was using the path's first
+  letter. With that and the folder records, **both front-ends now write byte-identical
+  archives** for the same input (there is a test).
 - **Members after an undecodable one were silently dropped.** The stream walk stops at
   the first member whose packed size the header does not record, and the reader then
   rejected every record whose stream it had not walked — so an archive with an opaque

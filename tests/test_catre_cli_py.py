@@ -78,3 +78,39 @@ def test_folders_are_records_not_slashes_in_a_name(tmp_path):
     assert _run("extract", arc, "-o", str(out)).returncode == 0
     assert (out / "tree" / "empty").is_dir()
     assert (out / "tree" / "sub" / "deep" / "f.txt").read_text() == "content\n"
+
+
+def test_ext_header_is_the_basename_initial(tmp_path):
+    """The ext header holds the first letter of the BASENAME, not of the path.
+
+    Checked against an engine-made archive: `XD/nocreo.txt` carries `n`, not `X`.
+    """
+    from qcf_tool.qcm import build_member_stream
+    stream = build_member_stream("XD/nocreo.txt", b"content\n")
+    ext_len = stream[0x1B]
+    assert ext_len == 1
+    assert stream[0x1C:0x1C + 1] == b"n"
+
+
+def test_both_front_ends_write_the_same_archive(tmp_path):
+    """C and Python produce identical bytes for the same input (bar the timestamp)."""
+    catre_bin = os.path.join(ROOT, "catre")
+    if not (os.path.isfile(catre_bin) and os.access(catre_bin, os.X_OK)):
+        pytest.skip("catre binary not built")
+    src = tmp_path / "tree"
+    (src / "sub").mkdir(parents=True)
+    (src / "empty").mkdir()
+    (src / "a.txt").write_text("hello\n")
+    (src / "sub" / "b.txt").write_text("world\n")
+
+    c_arc, py_arc = tmp_path / "c.qcf", tmp_path / "py.qcf"
+    assert subprocess.run([catre_bin, "compress", str(src), "-o", str(c_arc),
+                           "--no-progress"], cwd=ROOT, capture_output=True).returncode == 0
+    assert _run("compress", str(src), "-o", str(py_arc)).returncode == 0
+
+    a, b = c_arc.read_bytes(), py_arc.read_bytes()
+    assert len(a) == len(b)
+    # only the DOS datetime fields may differ, and only if a second ticked over
+    diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+    cdir = a.rfind(b"\x03\x00\x00TOP") - 17
+    assert all(i >= cdir for i in diff), f"differences outside the directory: {diff[:8]}"

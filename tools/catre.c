@@ -442,6 +442,36 @@ typedef struct {
     uint8_t *owned;                 /* non-NULL when we allocated `inner` */
 } OutMember;
 
+/* Write the directory records for one folder: its files, then each subfolder's record
+ * followed by that subfolder's own contents (depth first, like the engine). */
+static void emit_dir(Buf *out_b, OutMember *m, uint32_t *so, int n, DirList *all,
+                     const char *prefix, uint32_t parent, uint32_t dt){
+    size_t plen=strlen(prefix);
+    for (int i=0;i<n;i++){
+        const char *nm=m[i].name, *ls=strrchr(nm,'/');
+        int in_here = plen ? (!strncmp(nm,prefix,plen) && nm[plen]=='/' && ls==nm+plen)
+                           : (ls==NULL);
+        if (!in_here) continue;
+        const char *bn = ls ? ls+1 : nm;
+        bu32(out_b,parent); bu32(out_b,so[i]); bu8(out_b,2); bu32(out_b,m[i].dt);
+        bu32(out_b,m[i].orig);
+        size_t nl=strlen(bn); bu8(out_b,(uint8_t)nl); bu8(out_b,0); bu8(out_b,0);
+        bput(out_b,bn,nl);
+    }
+    for (int i=0;i<all->n;i++){
+        const char *dn=all->name[i], *ls=strrchr(dn,'/');
+        int in_here = plen ? (!strncmp(dn,prefix,plen) && dn[plen]=='/' && ls==dn+plen)
+                           : (ls==NULL);
+        if (!in_here) continue;
+        const char *bn = ls ? ls+1 : dn;
+        uint32_t myoff=(uint32_t)out_b->n;
+        bu32(out_b,parent); bu32(out_b,0); bu8(out_b,0); bu32(out_b,dt);   /* type=0 */
+        bu32(out_b,0); size_t nl=strlen(bn); bu8(out_b,(uint8_t)nl); bu8(out_b,0); bu8(out_b,0);
+        bput(out_b,bn,nl);
+        emit_dir(out_b,m,so,n,all,dn,myoff,dt);
+    }
+}
+
 /* Assemble a QCM archive: header, member streams, then the central directory with
  * folder records (including empty folders) and file records wired to their parents. */
 static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
@@ -483,52 +513,13 @@ static int write_qcm(const char *out, OutMember *m, int n, DirList *extra_dirs){
         }
     }
 
-    /* iterative depth-first walk over (prefix, parent record offset) */
-    typedef struct { char prefix[1024]; uint32_t parent; } Frame;
-    Frame *stack=calloc((size_t)all.n+1,sizeof(Frame)); int sp=0;
-    int *dir_done=calloc(all.n?all.n:1,sizeof(int));
-    int *children=calloc(all.n?all.n:1,sizeof(int));
-    stack[sp].prefix[0]=0; stack[sp].parent=cdir; sp++;
-    while (sp>0){
-        Frame fr=stack[--sp];
-        size_t plen=strlen(fr.prefix);
-        for (int i=0;i<n;i++){                   /* files directly in this folder */
-            const char *nm=m[i].name;
-            const char *ls=strrchr(nm,'/');
-            int in_here = plen ? (!strncmp(nm,fr.prefix,plen) && nm[plen]=='/' &&
-                                  ls==nm+plen)
-                               : (ls==NULL);
-            if (!in_here) continue;
-            const char *bn = ls ? ls+1 : nm;
-            bu32(&out_b,fr.parent); bu32(&out_b,so[i]); bu8(&out_b,2); bu32(&out_b,m[i].dt);
-            bu32(&out_b,m[i].orig);
-            size_t nl=strlen(bn); bu8(&out_b,(uint8_t)nl); bu8(&out_b,0); bu8(&out_b,0);
-            bput(&out_b,bn,nl);
-        }
-        /* subfolders of this folder, deepest pushed last so they come out in order */
-        int nc=0;
-        for (int i=0;i<all.n;i++){
-            if (dir_done[i]) continue;
-            const char *dn=all.name[i];
-            const char *ls=strrchr(dn,'/');
-            int in_here = plen ? (!strncmp(dn,fr.prefix,plen) && dn[plen]=='/' && ls==dn+plen)
-                               : (ls==NULL);
-            if (in_here) children[nc++]=i;
-        }
-        for (int c=nc-1;c>=0;c--){
-            int i=children[c]; dir_done[i]=1;
-            const char *dn=all.name[i];
-            const char *ls=strrchr(dn,'/'); const char *bn = ls ? ls+1 : dn;
-            uint32_t myoff=(uint32_t)out_b.n;
-            bu32(&out_b,fr.parent); bu32(&out_b,0); bu8(&out_b,0); bu32(&out_b,dt);  /* type=0 */
-            bu32(&out_b,0); size_t nl=strlen(bn); bu8(&out_b,(uint8_t)nl); bu8(&out_b,0); bu8(&out_b,0);
-            bput(&out_b,bn,nl);
-            strncpy(stack[sp].prefix,dn,sizeof stack[sp].prefix-1);
-            stack[sp].prefix[sizeof stack[sp].prefix-1]=0;
-            stack[sp].parent=myoff; sp++;
-        }
-    }
-    free(stack); free(dir_done); free(children); dirs_free(&all);
+    /* Depth first, the way the engine lays its own archives out: a folder's files,
+     * then each subfolder record followed immediately by that subfolder's contents.
+     * (Writing all sibling folder records together before descending builds the same
+     * tree but a different byte layout, and the point here is to look like the
+     * original.) */
+    emit_dir(&out_b, m, so, n, &all, "", cdir, dt);
+    dirs_free(&all);
     FILE *f=fopen(out,"wb");
     if(!f){ bar_clear(); perror("open out"); free(so); free(out_b.p); return -1; }
     fwrite(out_b.p,1,out_b.n,f); fclose(f);

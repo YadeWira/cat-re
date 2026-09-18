@@ -262,9 +262,13 @@ def build_qcm_office(raw: bytes, name: str, dos_datetime: int = 0x5CCA22A4) -> b
 
 
 def build_member_stream(name: str, raw: bytes) -> bytes:
-    """One member's stored stream: QCF header + ext byte + deflate payload."""
+    """One member's stored stream: QCF header + ext byte + deflate payload.
+
+    The ext header holds the first letter of the member's BASENAME — checked against
+    an engine-made archive: `XD/nocreo.txt` carries `n`, not `X`.
+    """
     comp = zlib.compress(raw, 9)
-    ext = name.encode("utf-8")[:1]
+    ext = name.rsplit("/", 1)[-1].encode("utf-8")[:1]
     inner = (
         MAGIC_QCF + b"\x00" * 4 + struct.pack("<I", len(comp)) + b"\x00" * 4
         + struct.pack("<I", 0x0011001E)
