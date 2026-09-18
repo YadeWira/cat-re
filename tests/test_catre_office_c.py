@@ -112,3 +112,48 @@ def test_pdf_wholefile_extracts_bit_exact(tmp_path):
     with open(os.path.join(QCF_FIX, "pdf_wholefile.pdf"), "rb") as f:
         assert got.read_bytes() == f.read()
     assert _run("test", arc, "-v").returncode == 0
+
+
+def test_identifies_and_skips_the_engine_image_codecs(tmp_path):
+    """The two image codecs we cannot decode must be named, and skipped cleanly.
+
+    Both fixtures are engine-made from synthetic images: a paletted GIF (sub-codec
+    0x02) and a grayscale TIFF (sub-codec 0x09, the LEAD path). Neither is JPEG2000,
+    and neither is byte-exact even through the original software.
+    """
+    for name, codec in (("image_x.gif.qcf", "image-x"), ("lead_cmp.tif.qcf", "lead-cmp")):
+        arc = os.path.join(QCF_FIX, name)
+        listing = _run("list", arc, "-v")
+        assert codec in listing.stdout, listing.stdout
+
+        out = tmp_path / codec
+        r = _run("extract", arc, "-o", str(out), "--no-progress")
+        assert r.returncode == 0, r.stderr
+        assert "SKIP" in r.stderr and "needs the original Choshuku engine" in r.stderr
+        assert not any(out.iterdir()) if out.exists() else True
+
+        t = _run("test", arc, "-v")
+        assert "SKIP" in t.stdout and "1 skipped" in t.stdout
+
+
+def test_c_tool_writes_the_office_codec(tmp_path):
+    """The C Office encoder (36-byte MSOC21 header + zlib of the whole OLE2 file).
+
+    The original engine decodes this byte-exact — that was validated when the codec
+    was written; this keeps the header shape from drifting.
+    """
+    doc = os.path.join(FIX, "Bug49919.doc")
+    arc = str(tmp_path / "o.qcf")
+    assert _run("compress", doc, "-o", arc, "--no-progress").returncode == 0
+    assert "office" in _run("list", arc, "-v").stdout
+
+    data = open(arc, "rb").read()
+    ext = data[8 + 0x1B]
+    payload = data[8 + 0x1C + ext:]
+    assert payload[:6] == b"\x32\x01\x12\x00\x00\x00"     # MSOC21 whole-file header
+    assert payload[6:8] == b"\x33\x02"
+    assert payload[18:22] == b"\x04\x0a\x00\x05"          # the marker the engine looks for
+
+    out = tmp_path / "back"
+    assert _run("extract", arc, "-o", str(out), "--no-progress").returncode == 0
+    assert (out / "Bug49919.doc").read_bytes() == open(doc, "rb").read()
