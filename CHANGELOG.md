@@ -17,6 +17,14 @@ the Python one can do too, and it now writes the format the way the engine does.
   with slashes in it, which is not what the format does — folders are records of their
   own (type `0x00`) with parent pointers. Empty folders are written and restored too.
 
+### Added
+- **`list` and `info` report folders.** An archive of empty folders used to print
+  "0 file(s)" and nothing else, which reads like an empty archive even though the
+  folders are there and `extract` restores them. Folders now show with a trailing `/`
+  (both front-ends), and `info` counts them.
+- **`delete` can remove an empty folder.** It only counted file members, so deleting a
+  folder that holds no files reported "no member matched" and changed nothing.
+
 ### Fixed (Python front-end)
 - **Members after an undecodable one were silently dropped.** The stream walk stops at
   the first member whose packed size the header does not record, and the reader then
@@ -42,6 +50,7 @@ checks on every command. Two real bugs, both fixed.
   an invalid archive takes. Every command is clean under LeakSanitizer.
 
 ### Changed
+- `qcf_tool/__init__.py` carried a stale `__version__` of 0.1.0.
 - `scripts/engine_matrix.py` records the codec **we** chose as well: when our side goes
   lossy (an image) the engine's round-trip cannot be compared byte for byte, and those
   rows no longer count as failures.

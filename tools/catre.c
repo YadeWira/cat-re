@@ -712,10 +712,10 @@ static int cmd_delete(int argc, char **argv){
         om[on].inner=d+mem[i].inner_off; om[on].inner_len=mem[i].inner_len;
         on++;
     }
-    if (!removed){ fprintf(stderr,"catre: no member matched\n");
-                   free(om); free(mem); free(d); free(names); dirs_free(&dirs); return 1; }
-    /* a folder the user deleted should not come back through the folder records */
-    static DirList keep; keep.n=0;
+    /* a folder the user deleted should not come back through the folder records —
+     * and deleting an EMPTY folder removes nothing but a folder record, which still
+     * counts as having deleted something. */
+    DirList keep={0};
     for (int i=0;i<dirs.n;i++){
         int drop=0;
         for (int j=0;j<nn;j++){
@@ -723,8 +723,12 @@ static int cmd_delete(int argc, char **argv){
             if (!strcmp(dirs.name[i],names[j]) ||
                 (!strncmp(dirs.name[i],names[j],L) && dirs.name[i][L]=='/')) drop=1;
         }
-        if (!drop) dirs_add(&keep,dirs.name[i]);
+        if (drop){ removed++; if(verbose) printf("  - %s/\n",dirs.name[i]); }
+        else dirs_add(&keep,dirs.name[i]);
     }
+    if (!removed){ fprintf(stderr,"catre: no member matched\n");
+                   free(om); free(mem); free(d); free(names);
+                   dirs_free(&dirs); dirs_free(&keep); return 1; }
     int written=write_qcm(arc,om,on,&keep);
     free(om); free(mem); free(d); free(names); dirs_free(&dirs); dirs_free(&keep);
     if (written<0) return 1;
@@ -881,10 +885,18 @@ static int cmd_list(int argc, char **argv){
     }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    Member *mem=NULL; int n=qcm_read(d,len,&mem,NULL);
+    Member *mem=NULL; DirList dirs={0};
+    int n=qcm_read_ex(d,len,&mem,NULL,&dirs);
     if(n<0){ fprintf(stderr,"catre: not a valid .qcf\n"); return 1; }
-    printf("Archive: %s  (%d file(s))\n",arc,n);
+    /* folders are archive contents too — an archive of empty folders used to print
+     * "0 file(s)" and nothing else, which reads like an empty file. */
+    if (dirs.n) printf("Archive: %s  (%d file(s), %d folder(s))\n",arc,n,dirs.n);
+    else        printf("Archive: %s  (%d file(s))\n",arc,n);
     if (verbose) printf("%11s %11s %7s  %-9s %-19s name\n","size","packed","ratio","codec","modified");
+    for (int i=0;i<dirs.n;i++){
+        if (verbose) printf("%11s %11s %7s  %-9s %-19s %s/\n","-","-","-","folder","",dirs.name[i]);
+        else printf("  %s/\n",dirs.name[i]);
+    }
     for (int i=0;i<n;i++){
         if (verbose){ char dts[32]; dos_str(mem[i].dt,dts);
             if (!mem[i].comp){   /* opaque codec: the packed size isn't computable — don't print 0 */
@@ -896,7 +908,7 @@ static int cmd_list(int argc, char **argv){
             }
         } else printf("  %s\n",mem[i].name);
     }
-    free(mem); free(d); return 0;
+    dirs_free(&dirs); free(mem); free(d); return 0;
 }
 
 static int cmd_info(int argc, char **argv){
@@ -908,17 +920,19 @@ static int cmd_info(int argc, char **argv){
     }
     if(!arc){ fprintf(stderr,"catre: archive required\n"); return 2; }
     size_t len; uint8_t *d=read_file(arc,&len); if(!d){ perror(arc); return 1; }
-    uint32_t cdir; Member *mem=NULL; int n=qcm_read(d,len,&mem,&cdir);
+    uint32_t cdir; Member *mem=NULL; DirList dirs={0};
+    int n=qcm_read_ex(d,len,&mem,&cdir,&dirs);
     if(n<0){ printf("%s: not a QCM/.qcf container\n",arc); free(d); return 1; }
     size_t total=0; for(int i=0;i<n;i++) total+=mem[i].orig;
     printf("file:           %s\n",arc);
     printf("format:         QCM container (Choshuku/CAT .qcf)\n");
     printf("archive size:   %zu bytes\n",len);
     printf("members:        %d\n",n);
+    printf("folders:        %d\n",dirs.n);
     printf("central dir @:  0x%x\n",cdir);
     printf("uncompressed:   %zu bytes\n",total);
     printf("overall ratio:  %.1f%%\n",total?100.0*len/total:0);
-    free(mem); free(d); return 0;
+    dirs_free(&dirs); free(mem); free(d); return 0;
 }
 
 static int cmd_test(int argc, char **argv){

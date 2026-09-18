@@ -144,9 +144,16 @@ def cmd_delete(args):
             continue
         kept.append({"name": m.name, "orig": m.original_size, "dt": m.dos_datetime,
                      "inner": m.inner})
+    folders = []
+    for d in (arc.folders or []):
+        if hit(d):                       # deleting an empty folder removes only a record
+            removed += 1
+            if args.verbose:
+                print(f"  - {d}/")
+        else:
+            folders.append(d)
     if not removed:
         sys.exit("catre: no member matched")
-    folders = [d for d in (arc.folders or []) if not hit(d)]
     blob = write_qcm(kept, folders, _now_dos())
     with open(args.archive, "wb") as f:
         f.write(blob)
@@ -188,10 +195,17 @@ def cmd_extract(args):
 
 def cmd_list(args):
     arc = QcmArchive.read(open(args.archive, "rb").read())
-    print(f"Archive: {args.archive}  ({len(arc.members)} file(s))")
+    folders = arc.folders or []
+    if folders:
+        print(f"Archive: {args.archive}  ({len(arc.members)} file(s), {len(folders)} folder(s))")
+    else:
+        print(f"Archive: {args.archive}  ({len(arc.members)} file(s))")
     if args.verbose:
         print(f"{'size':>11}  {'packed':>11}  {'ratio':>6}  {'codec':<9}  {'modified':<19}  name")
         print("-" * 80)
+    for d in folders:            # folders are contents too, empty ones especially
+        print(f"{'-':>11}  {'-':>11}  {'-':>6}  {'folder':<9}  {'':<19}  {d}/"
+              if args.verbose else f"  {d}/")
     for m in arc.members:
         if args.verbose:
             y, mo, da, hh, mn, ss = dos_datetime_to_tuple(m.dos_datetime)
@@ -218,6 +232,7 @@ def cmd_info(args):
     print(f"format:         QCM container (Choshuku/CAT .qcf)")
     print(f"archive size:   {_fmt_size(len(data))} ({len(data)} bytes)")
     print(f"members:        {len(arc.members)}")
+    print(f"folders:        {len(arc.folders or [])}")
     print(f"central dir @:  0x{arc.cdir_offset:x}")
     codecs = sorted({m.codec_name for m in arc.members})
     print(f"codecs used:    {', '.join(codecs)}")

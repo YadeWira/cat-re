@@ -31,8 +31,16 @@ def _run(*args, cwd=ROOT):
 
 
 def _names(arc):
+    """File members only — `list` also prints folder records, with a trailing '/'."""
     r = _run("list", arc)
-    return [l.strip() for l in r.stdout.splitlines()[1:] if l.strip()]
+    return [l.strip() for l in r.stdout.splitlines()[1:]
+            if l.strip() and not l.strip().endswith("/")]
+
+
+def _folders(arc):
+    r = _run("list", arc)
+    return [l.strip().rstrip("/") for l in r.stdout.splitlines()[1:]
+            if l.strip().endswith("/")]
 
 
 def test_add_then_delete(tmp_path):
@@ -152,3 +160,38 @@ def test_truncated_archive_is_rejected_not_crashed(tmp_path, cut):
                 ["extract", str(bad), "-o", str(tmp_path / "o"), "--no-progress"]):
         r = _run(*cmd)
         assert r.returncode in (0, 1, 2), f"{cmd[0]} crashed with {r.returncode}"
+
+
+def test_list_shows_folders_including_empty_ones(tmp_path):
+    """An archive of empty folders is not an empty archive (v1.9)."""
+    root = tmp_path / "onlydirs"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "c").mkdir()
+    arc = str(tmp_path / "od.qcf")
+    assert _run("compress", str(root), "-o", arc, "--no-progress").returncode == 0
+
+    r = _run("list", arc)
+    assert "0 file(s), 4 folder(s)" in r.stdout, r.stdout
+    assert sorted(_folders(arc)) == ["onlydirs", "onlydirs/a", "onlydirs/a/b", "onlydirs/c"]
+    assert "folders:        4" in _run("info", arc).stdout
+
+    out = tmp_path / "out"
+    assert _run("extract", arc, "-o", str(out), "--no-progress").returncode == 0
+    assert (out / "onlydirs" / "a" / "b").is_dir()
+    assert (out / "onlydirs" / "c").is_dir()
+
+
+def test_delete_an_empty_folder(tmp_path):
+    """Deleting an empty folder removes a folder record and nothing else (v1.9)."""
+    root = tmp_path / "tree"
+    (root / "keep").mkdir(parents=True)
+    (root / "gone").mkdir()
+    (root / "keep" / "f.txt").write_text("stay\n")
+    arc = str(tmp_path / "t.qcf")
+    assert _run("compress", str(root), "-o", arc, "--no-progress").returncode == 0
+    assert "tree/gone" in _folders(arc)
+
+    r = _run("delete", arc, "tree/gone", "-v")
+    assert r.returncode == 0, r.stderr
+    assert "tree/gone" not in _folders(arc)
+    assert _names(arc) == ["tree/keep/f.txt"]

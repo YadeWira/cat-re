@@ -14,4 +14,4 @@ See docs/RE_notes.md for the reverse-engineering context.
 from .format import QcfFile, QcfHeader, MAGIC_QCF, MAGIC_QCM, MAGIC_ZIP
 
 __all__ = ["QcfFile", "QcfHeader", "MAGIC_QCF", "MAGIC_QCM", "MAGIC_ZIP"]
-__version__ = "0.1.0"
+__version__ = "1.9.0"

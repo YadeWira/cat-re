@@ -75,7 +75,7 @@ qcf_tool/                 Python reimplementation: reads every codec, writes DEF
 libcat/, tools/cat-tool.c older C library and CLI, kept for reference
 harness/                  Wine/MinGW harnesses that drive the original DLLs
 scripts/engine_matrix.py  conformance harness: original engine vs catre, file by file
-tests/                    pytest suite (53) + real engine-made fixtures
+tests/                    pytest suite (62) + real engine-made fixtures
 docs/                     the specification of record — QCF_FORMAT_SPEC.md, RE_verified.md
 ```
 
