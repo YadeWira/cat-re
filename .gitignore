@@ -1,5 +1,7 @@
 # Reverse-engineering workspace (huge, regenerable)
-ghidra/
+# The Ghidra install itself (huge). The RE scripts live in scripts/ghidra/, which
+# is why this pattern is anchored to the repo root.
+/ghidra/
 
 # Not for the public repo: proprietary product, large corpora, experiments
 OLD/
