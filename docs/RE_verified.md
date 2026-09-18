@@ -575,3 +575,43 @@ Un PNG **RGBA** produce un member de imagen donde el codestream J2K **no** empie
 800×600), con la misma pinta de coder que el payload `0x09`. `catre` localiza ahora el
 codestream buscando `FF4F FF51` y validando `Xsiz/Ysiz` contra el wrapper: recupera la imagen
 (34,5 dB), no la transparencia.
+
+## 12. Fidelidad del DECODE — medida sobre 250 archivos del motor (2026-09-18)
+
+Método: el motor comprime cada archivo, `catre` lo extrae, y se compara con el original.
+Además el **motor descompone su propio `.qcf`** (`--ceiling` del arnés), que da el
+denominador honesto: lo que el software original no devuelve idéntico no lo devuelve nadie.
+
+### Corpus aleatorio (150 archivos de los 36.624, todos los tipos)
+
+| | archivos | % |
+|---|--:|--:|
+| producimos salida | 148/150 | 98,7 % |
+| **byte-exactos vs el original** | **148/150** | **98,7 %** |
+| el motor mismo restaura exacto (techo) | 148/150 | 98,7 % |
+| **de lo recuperable, recuperamos** | **148/148** | **100 %** |
+
+Códecs: deflate 147 (147/147 recuperados), office-ps 2 (1/1 de lo recuperable),
+lead-cmp 1 (irrecuperable también para el motor).
+
+### Formatos con códec especial (100 archivos: doc/xls/ppt/pdf/png/gif/jpg/bmp/tif)
+
+| | archivos | % |
+|---|--:|--:|
+| producimos salida | 70/100 | 70 % |
+| **byte-exactos vs el original** | **53/100** | **53 %** |
+| el motor mismo restaura exacto (techo) | 53/100 | 53 % |
+| **de lo recuperable, recuperamos** | **53/53** | **100 %** |
+
+Por códec del motor: deflate 27/27 · office-ps 15/15 · office 10/10 · pdf-proc 1/1 —
+todos sobre lo recuperable. `image-jp2` (17), `lead-cmp` (10) e `image-x` (6): **nada es
+byte-exacto ahí, tampoco para el motor**, porque son recompresiones con pérdida.
+
+### Lectura de estos números
+
+- **Sobre los 250 archivos: 201 son recuperables y recuperamos 201 → cero huecos reales.**
+- El 53 % de los "formatos difíciles" no es una carencia del clon: es que el motor
+  reescribe documentos y recomprime imágenes con pérdida. El techo y nuestro resultado
+  coinciden exactamente.
+- En imágenes, la métrica útil no es byte-exacto sino PSNR: nuestra decodificación coincide
+  con **la decodificación que hace el propio motor** del mismo `.qcf` a 35,8–38,6 dB.

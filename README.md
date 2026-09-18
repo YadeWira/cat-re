@@ -60,9 +60,20 @@ is recoverable *at all*. Over 31 real Office documents:
 | **`catre` skips** | **0** | **9** |
 
 **Zero real gaps**: every member we skip is one the *original software* returns altered — it
-re-encodes the document instead of storing it. Same shape for PDF. A random 250-file corpus
-sample: 248 DEFLATE members, all byte-exact in both directions. Deliberately out of scope: the
-LEADTOOLS image codecs (a third party's IP, still sold today).
+re-encodes the document instead of storing it.
+
+Measured over **250 archives the engine produced**, comparing our extraction against the
+original file *and* against what the engine itself restores:
+
+| Sample | byte-exact | the engine's own ceiling | of what is recoverable |
+|---|:--:|:--:|:--:|
+| 150 random corpus files | 98.7 % | 98.7 % | **100 %** |
+| 100 files in the formats with special codecs | 53 % | 53 % | **100 %** |
+
+The 53 % is not a shortfall: it is the engine re-encoding documents and recompressing images
+lossily. For images the useful measure is PSNR — our decode matches the engine's **own** decode
+of the same archive at 35.8–38.6 dB. Deliberately out of scope: the LEADTOOLS image codecs (a
+third party's IP, still sold today).
 
 Details: **[Cloning Status](https://github.com/YadeWira/cat-re/wiki/Cloning-Status)** ·
 **[Codec Map](https://github.com/YadeWira/cat-re/wiki/Codec-Map)**.
