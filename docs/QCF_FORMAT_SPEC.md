@@ -126,7 +126,7 @@ real, a diferencia de las patentes CAT ya expiradas). `QCLf.dll` = módulo de **
 El payload de un member de imagen (codec=1) es `[wrapper 26B][codestream J2K]`. Wrapper
 (verificado diffeando 4 muestras del motor + reimplementado en `tools/catre_img.c`):
 ```
-+00  1   tag (0x15 en salida del motor actual)
++00  1   id de formato LEADTOOLS del archivo ORIGEN (ver abajo)
 +01  1   0
 +02  2   width  (u16 LE)
 +04  2   height (u16 LE)
@@ -140,6 +140,23 @@ El payload de un member de imagen (codec=1) es `[wrapper 26B][codestream J2K]`. 
 ```
 Y en el QCF header del member-imagen: `inner+04` = tamaño del archivo fuente, `inner+18`=01
 (codec), `inner+19`=01. `catre` produce esto con OpenJPEG y el **motor original lo decodifica**.
+
+**El byte +00 del wrapper (medido 2026-09-18)**: es el identificador de formato de LEADTOOLS
+del archivo de ORIGEN, y es lo que el motor usa al descomprimir para devolver el archivo en su
+formato original (por eso un GIF vuelve GIF y un PNG paletado vuelve PNG paletado):
+
+| entrada | byte +00 |
+|---|:--:|
+| GIF | `0x02` |
+| TIFF | `0x03` |
+| BMP | `0x06` |
+| JPEG | `0x15` (21) |
+| PNG | `0x4b` (75) |
+
+Confirmado además en el binario: `CODEC4.dll` despacha por esa constante — `FUN_1002a940` hace
+`if (formato != 0x4b) → handler genérico`, y todo el código alrededor de esa rama es el de PNG
+(`CLTPNGBitmap::InternalSave`). `catre` escribe `0x15` fijo y el motor lo acepta, pero lo correcto
+es reflejar el formato de origen.
 
 ### JPEG2000 (imágenes) ✅
 - Payload = wrapper de 26B (ancho/alto/bpp) + codestream J2K crudo (`FF4F FF51`).
@@ -295,5 +312,21 @@ Barrido con imágenes sintéticas de 160×160, variando colores y entropía, ley
 4. El sub-codec `0x02` aparece con entradas paletadas de ≥251 colores y con grises de 8 bits; el
    motor las devuelve como GIF/PNG paletados.
 
-**Lo que NO está establecido**: la función de decisión exacta. Vive en `CODEC4`/`IMGCMP`
-(que cargan los filtros LEADTOOLS), y resolverla requiere decompilarla — no más experimentos.
+**Lo que NO está establecido**: la función de decisión exacta (qué elige entre `0x01`, `0x02` y
+`0x09`). Pasada de Ghidra sobre `IMGCMP.dll` y `CODEC4.dll` (2026-09-18) — lo que sí quedó claro:
+
+- **La selección de códec es por registro**: `IMGCMP!FUN_10010240` arma
+  `SOFTWARE\QuikCAT\CODEC\%d\{CLSID}\InprocServer32`, hace `LoadLibrary` +
+  `DllGetClassObject`; `FUN_10010b60` recorre la lista de codecs registrados y devuelve el CLSID
+  cuyo id coincide con el byte que trae el header (`FUN_10012680`: si el magic es `QCF\x01`,
+  devuelve ese byte). Confirma que `inner+0x1A` es el `CodecID` del registro.
+- **`CODEC4` despacha por constante de formato LEADTOOLS** (ver el wrapper de imagen más arriba).
+- **El camino Kakadu normaliza la profundidad antes de codificar**: `FUN_10021440` hace
+  `ColorRes(4)` si bpp<4, `ColorRes(8)` si bpp∈[5,7], `ColorRes(24)` (`KDU_TRUE_COLOR`) si bpp>8
+  y ≠24; deja 4, 8 y 24 como están.
+- **Al descomprimir, el formato de salida sale de `m_FileHeader.GetFormat()`** — por eso devuelve
+  el archivo en su formato original.
+
+La rama concreta que elige entre J2K y los dos caminos LEAD no apareció en esta pasada: está en
+código que llama a los filtros LEADTOOLS resueltos dinámicamente. Haría falta otra sesión de
+Ghidra más profunda o un depurador enganchado al motor.
