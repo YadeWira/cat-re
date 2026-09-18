@@ -1,344 +1,85 @@
 # cat-re — Choshuku / CAT Reverse Engineering
 
-A from-scratch reimplementation of the [Choshuku Professional (超圧縮)](https://www.sourcenext.com/download/cho_pro.html) v1.0.2
-compression utility by SOURCENEXT / QuikCAT Technologies (2003).
+A from-scratch, free reimplementation of the `.qcf` (QCM) archiver shipped in 2003 as
+[Choshuku Professional (超圧縮)](https://www.sourcenext.com/download/cho_pro.html) by
+SOURCENEXT / QuikCAT Technologies — and, under different branding, as *Miliki Super
+Compressor Pro*. Same QuikArchive engine, same format.
 
-Deliverables (the C tool runs on Linux **and** Windows):
+`catre` reads and writes the real thing with **no original DLLs**: DEFLATE, lossy JPEG2000
+images, Office (MSOC21) and PDF (PdfProc) members, single file, multi-file and nested folders.
+The original engine decompresses what `catre` writes, and vice versa.
 
-| Component     | Language | Purpose                                                |
-|---------------|----------|--------------------------------------------------------|
-| `tools/catre.c` | C      | **CAT RE v1.7** — the main archiver (zero-dependency static binary). |
-| `qcf_tool/`   | Python   | Pure-Python reader (every codec identified) + DEFLATE writer. |
-| `libcat/`     | C        | Native port of the algorithms + `cat-tool` CLI.        |
-| `harness/`    | C        | Wine harness to drive the original Windows DLLs.       |
+📖 **[Documentation is in the wiki](https://github.com/YadeWira/cat-re/wiki)** — usage, format,
+codec map, measured cloning status, benchmarks, reverse-engineering notes.
 
-## Prebuilt binaries
+## Install
 
-`catre` ships as **zero-dependency static binaries** (no DLLs, no runtime, nothing to install):
+Zero-dependency static binaries on the [Releases](https://github.com/YadeWira/cat-re/releases)
+page — no DLLs, no runtime, nothing to install:
 
-| Platform | File | Notes |
-|---|---|---|
-| Linux x64   | `catre-linux-x64`        | static; `ldd` → "not a dynamic executable" |
-| Windows x64 | `catre-windows-x64.exe`  | tested on **Windows 7 SP1 x64** (build 7601) |
-| Windows x86 | `catre-windows-x86.exe`  | 32-bit; runs on x86 and x64 Windows |
-
-See the repository **Releases** page for downloads. To rebuild them yourself:
-
-```bash
-make deps                        # build static OpenJPEG once (→ ~/.cache/catre-deps)
-scripts/build-win-deps.sh        # build static zlib + OpenJPEG for mingw (x64 + x86)
-make dist                        # → dist/{catre-linux-x64,catre-windows-x64.exe,catre-windows-x86.exe}
-```
-
-Both scripts write to `~/.cache/catre-deps` (override with `CATRE_DEPS=...`); a system
-OpenJPEG is used automatically when it is installed.
-
-## What is `.qcf`?
-
-`.qcf` is a small binary container with a 28-byte fixed header plus an
-optional extended header, wrapping a single inner stream. The inner
-stream is one of:
-
-- raw bytes (default)
-- a ZIP archive
-- a JPEG2000 codestream (the "CAT algorithm" — built on Kakadu)
-- an OLE2 compound document (Office docs)
-
-See [docs/RE_notes.md](docs/RE_notes.md) for the full reverse-engineering
-notes (format layout, codec dispatch table, COM IIDs, etc.).
-
-## Quick start
-
-### CAT RE v1.7 CLI (recommended)
-
-`catre` is the main archiver — a **native C** tool (links zlib + OpenJPEG statically; no
-original DLLs). It reads real `.qcf` (single/multi/nested folders) and writes DEFLATE +
-**lossy JPEG2000** for images. Verified: the original Choshuku engine decompresses archives
-`catre` produces (including images and folders).
-
-```bash
-make deps             # once: build the static OpenJPEG it links against
-make catre            # native binary (zlib + OpenJPEG, static)
-make catre-static     # fully static, zero-dependency build
-
-./catre compress file.txt mydir/ -o out.qcf      # files & folders (native folder records)
-./catre compress photo.png -o out.qcf -q 50      # images → JPEG2000 lossy (quality 0-100)
-./catre list out.qcf -v                          # sizes, ratio, codec, date
-./catre extract out.qcf -o ./restored/           # folders restored; images decoded to PNG
-./catre info out.qcf                             # container + codec details
-./catre test out.qcf                             # verify integrity
-```
-Commands mirror the original software: `compress`/`c`, `extract`/`x`, `list`/`l`,
-`info`/`i`, `test`/`t`. `-q/--quality` sets the JPEG2000 **target PSNR** (q0 ≈ 26.7 dB …
-q100 ≈ 32.2 dB, calibrated to the original engine); `--store` forces lossless DEFLATE
-(use it for PNGs/diagrams you need bit-exact). Images that would *grow* under JPEG2000
-fall back to DEFLATE automatically.
-
-A pure-Python front-end also exists: `python3 -m qcf_tool.catre ...` (source:
-`qcf_tool/catre.py`). It parses every codec and decompresses the ones that need no image
-library — DEFLATE, Office whole-file, and the lossless mode of Office per-stream — while an
-image member is handed back as a raw JPEG2000 codestream (decoding it needs the C `catre`),
-and a member in a codec only the original engine can decode is **skipped with a message**.
-It **writes only DEFLATE**: the JPEG2000/Office *encoders* live solely in the native C
-`catre` above. Use it when you want a dependency-free reader/DEFLATE-writer in Python.
-
-### Python library (`qcf-tool`)
-
-```bash
-# 48 tests, all green
-PYTHONPATH=. python3 -m pytest tests/ -v
-
-# Inspect a .qcf file
-PYTHONPATH=. python3 -m qcf_tool info archive.qcf
-
-# Extract contents
-PYTHONPATH=. python3 -m qcf_tool extract archive.qcf -o out/
-
-# Pack files
-PYTHONPATH=. python3 -m qcf_tool pack input.txt -o out.qcf -n input.txt
-```
-
-### C (`libcat` + `cat-tool`)
-
-```bash
-# Install system deps (Debian/Ubuntu)
-apt-get install -y zlib1g-dev libopenjp2-7-dev
-
-# Build
-make
-
-# Run the test suite
-make test
-
-# Use the CLI
-./cat-tool info archive.qcf
-./cat-tool extract archive.qcf -o out/
-./cat-tool pack -o out.qcf -n hello.txt hello.txt
-```
-
-See [docs/LINUX_PORT.md](docs/LINUX_PORT.md) for the full API and
-backend matrix.
-
-## Cloning status
-
-How complete is this as a clone of the original product? Two answers, because the
-denominator matters — **≈90 % of the engine, ≈60 % of the full desktop product**.
-
-> **How this is measured.** `scripts/engine_matrix.py` runs the *original engine* and `catre`
-> over the same files and compares bytes, including what the engine itself restores. The number
-> that matters is not "what we decode" but "what is recoverable at all": over 31 real Office
-> documents, **every file the original software restores exactly, `catre` restores exactly too
-> (22/22), and every member we skip (9/9) is one the original software does not restore either**
-> — it re-encodes the document. Same shape for PDF. Full results: `docs/RE_verified.md` §11.
-
-**Engine & format** (the actual technical core — read/write `.qcf` with its codecs):
-
-| Component | Status | Notes |
-|---|:--:|---|
-| QCM container — single / multi / nested folders | ✅ **100 %** | read + write; the original engine decodes our output |
-| DEFLATE codec (generic, text, PDF, ZIP) | ✅ **100 %** | standard zlib |
-| JPEG2000 image codec (read + write, `-q`) | ✅ **~99 %** | PSNR-targeted, calibrated to the engine's quality→PSNR curve (validated: same PSNR per `-q` on test images). **Byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) but quality and size now track the engine |
-| Office MSOC21 — whole-file variant | ✅ **100 %** | read + write, engine-validated |
-| Office MSOC21 — per-stream variant (real Word/Excel) | 🟡 **partial = the ceiling** | it's **multi-mode**: its *whole-file zlib* mode is lossless and **decoded** (shipping `catre` and the Python front-end both extract those members byte-exact, since v1.5); the *structural-model* and *sparse-XLS (non-deflate)* modes are opaque/custom and out of scope — those members are listed and skipped with a clear message — and **measured**: the engine itself does not restore them byte-exact (it re-encodes the document), so nothing decodable is being missed |
-| PDF (`PdfProc`) — reading engine archives | 🟡 **partial, and that is the ceiling** | two modes: the *whole-file* one decodes **byte-exact** (v1.7); the *structural* one is skipped — and the original software does not restore those PDFs either (measured) |
-| Engine image codec `0x02` (GIF, paletted/gray PNG) | ❌ **not decodable** | measured 2026-09: not JPEG2000 at all (no `FF4F` codestream); identified as `image-x` and skipped |
-| LFC / LEADTOOLS codec | ❌ **out of scope** | confirmed (2026-06) to be **LEAD Technologies' proprietary CMP/CMW** format (`LFCMP13n.dll`). The engine selects it by input type — **TIFF / high-bit-depth grayscale → LEAD CMP** (codec id `0x09`); PNG/GIF/BMP/JPG → JPEG2000. It is a *third party's* IP with no public spec and no open decoder (LEADTOOLS is still a sold product), so reimplementing it is off-limits — unlike the expired QuikCAT/CAT patents. Also lossy here (16-bit → 8-bit). |
-| **Engine overall** | **~90 %** | everything needed to read/write `.qcf` for files, images, folders, and generic Office |
-
-**Full product** (everything the 2003 desktop application shipped):
-
-| Layer | Status | Notes |
-|---|:--:|---|
-| Compression engine + `.qcf` format | ✅ **~90 %** | see table above |
-| CLI tool (`compress`/`extract`/`list`/`info`/`test`) | ✅ **100 %** | English CLI; functional equivalent of the original operations |
-| GUI application | ❌ **0 %** | out of scope (this is a CLI/format tool) |
-| Shell integration (context menu, Explorer preview) | ❌ **0 %** | `QCShExt` / `QCShView` / `QCArchUI` — out of scope |
-| **Full product overall** | **~60–65 %** | the gap is mostly the Windows UI layer (intentionally excluded) + the third-party LFC codec |
-
-As a `.qcf` archiving library/tool the clone is essentially complete; as a *Windows
-desktop application with its GUI*, the entire visual layer is out of scope (a different
-project). See the details below.
-
-## Status & limitations
-
-> **Images and the original software (v1.6).** The engine's JPEG2000 codestream is
-> **bottom-up**; `catre` v1.0–v1.5 wrote and read rows top-down, so pictures exchanged with
-> the original program came out vertically mirrored (our own round-trip hid it — it flipped
-> twice). Fixed in v1.6, verified against the engine's own decode. Images written by
-> v1.0–v1.5 carry the old row order and will extract upside down under v1.6.
-
-**Reading** (validated against real engine archives):
-- Any `.qcf`: single-file, multi-file, and nested folders.
-- DEFLATE members → decompressed losslessly (zlib).
-- Image members → decoded (JPEG2000 via OpenJPEG) and written as PNG — **including images the
-  *original engine* produced** (fixed in v1.4; earlier versions wrongly rejected them).
-- Office/OLE2 members in the **whole-file `MSOC21` variant** → decompressed. Per-stream
-  (`office-ps`) members written in the engine's **whole-file zlib mode** → decompressed
-  **byte-exact** (v1.5); its structural/sparse modes stay opaque.
-- Members using the engine's **proprietary codecs we can't decode** are **listed and
-  identified** by `list`, and `extract` **skips them with a clear message** instead of
-  failing the whole archive. Measured against the engine (v1.6), those are: per-stream
-  Office in its opaque modes (`office-ps`), the LEAD path (`lead-cmp`: TIFF, some PNG), a
-  second engine image codec (`image-x`: GIF, paletted/grayscale PNG — it carries no
-  JPEG2000 codestream), and PDF members (`pdf-proc`: `PdfProc` writes a structural payload,
-  not zlib-of-file). See below.
-
-**Writing** (`catre compress`):
-- **DEFLATE** for generic files, with **native nested-folder records** — verified: the
-  *original* Choshuku engine decompresses archives `catre` produces.
-- **JPEG2000 (lossy)** for images (PNG/JPG/BMP/GIF) via `-q/--quality`, with the exact
-  26-byte IMGCMP wrapper — verified: the *original* engine decodes `catre`'s image archives.
-- **Office/OLE2** (`.doc/.xls/.ppt`) via the **`MSOC21` whole-file variant** (36-byte header +
-  zlib of the compound file) — verified: the *original* engine decodes `catre`'s Office archives
-  byte-exact. `--store` forces plain DEFLATE.
-
-**What is NOT implemented** (beyond the original shell UI, which is intentionally out of scope):
-
-| Missing | Notes |
+| Platform | File |
 |---|---|
-| **The per-stream `MSOC21` variant** (partially) | Multi-mode: its *whole-file zlib* mode is **lossless and decoded since v1.5**; a *structural-model* mode (an intermediate doc representation) and a *sparse-XLS* mode (a non-deflate/custom body) remain opaque and out of scope. Those members are listed and skipped with a clear message. See `docs/QCF_FORMAT_SPEC.md`. |
-| **LFC / LEADTOOLS codec** | Not supported. It is **LEAD Technologies' proprietary CMP/CMW** format (medical imaging), used by the engine for TIFF / high-bit-depth grayscale inputs (codec id `0x09`, not JPEG2000). It is a third party's IP — no public spec, no open decoder, and LEADTOOLS is still actively sold — so it is out of scope (and lossy here anyway). Note: `QCLf.dll` is the QuikCAT *license* module, not this codec. |
-| **Shell integration & GUI** | Context-menu handler (`QCShExt`), Explorer preview (`QCShView`), and dialogs (`QCArchUI`) are out of scope — this is a CLI/format tool. |
+| Linux x64 | `catre-linux-x64` (static) |
+| Windows x64 | `catre-windows-x64.exe` (tested on Windows 7 SP1) |
+| Windows x86 | `catre-windows-x86.exe` |
 
-`catre test` really decodes what it verifies: every DEFLATE, Office and JPEG2000 member is
-decompressed and checked (before v1.5 it reported `OK` for members it never touched, so a
-corrupted image passed). Members it cannot decode are reported as **skipped**, never as OK.
+Verify against `SHA256SUMS.txt`. On Linux, `chmod +x` the binary — GitHub strips the executable
+bit from release assets. Building it yourself:
+**[Building from Source](https://github.com/YadeWira/cat-re/wiki/Building-from-Source)**.
 
-Implemented & validated against the real engine: container (single/multi/**folders**), **DEFLATE**
-(zlib), **JPEG2000** (OpenJPEG) lossy images with quality control, and **Office/OLE2** (`MSOC21`
-whole-file zlib). Only **LFC** (LEADTOOLS, third-party) and the per-stream Office variant remain.
-See `docs/QCF_FORMAT_SPEC.md` and `docs/RE_verified.md`.
+## Use
 
-## Benchmarks
-
-Real `catre` runs on sample files, one per format the original CAT/Choshuku
-highlighted. **Ratio = compressed ÷ original** (lower is better; > 100 % means it grew).
-Sizes measured with `stat`, not estimated.
-
-**Image super-compression** — the flagship feature (lossy JPEG2000, by `-q`).
-Since v1.2 the encoder is **PSNR-targeted (content-adaptive)**, calibrated to the
-original engine's measured quality→PSNR curve (`q0→26.7 dB … q100→32.2 dB`), so the
-output size tracks image content like the real engine does. A 628 KB photographic JPEG:
-
-| Quality `-q` | `.qcf` | Ratio | Saved |
-|:--:|--:|:--:|:--:|
-| 100 (default) | 134,990 B | 21.0 % | 79 % |
-| 75 | 108,250 B | 16.8 % | 83 % |
-| 50 | 84,413 B | 13.1 % | 87 % |
-| 25 | 65,673 B | 10.2 % | 90 % |
-| 10 | 55,579 B | 8.6 % | 91 % |
-
-**Per format** (default codec):
-
-| Format | Codec | Original | `.qcf` | Ratio | Lossless? | Note |
-|---|---|--:|--:|:--:|:--:|---|
-| `.doc` (Word) | office (MSOC21) | 27,136 B | 5,836 B | **21.5 %** | ✅ | great |
-| `.xls` (Excel) | office (MSOC21) | 17,408 B | 4,014 B | **23.1 %** | ✅ | great |
-| `.txt` (text) | deflate | 20,000 B | 134 B | **0.7 %** | ✅ | repetitive text |
-| `.jpg` (photo) | image-jp2 | 643,154 B | *per `-q`* | 9–21 % | ❌ lossy | flagship (table above) |
-| `.png` | image-jp2 | 324,108 B | 2,567 B | 0.8 % | ❌ **lossy** | ⚠️ re-encoded to JPEG2000 (smooth diagram → tiny) |
-| `.pdf` | deflate | 112,246 B | 104,989 B | 93.5 % | ✅ | already compressed |
-| `.gif` (small) | deflate | 4,545 B | 4,308 B | 94.8 % | ✅ | JPEG2000 would grow it, so it is stored with DEFLATE instead |
-
-*(Measured with v1.5; `-q 100` unless stated.)*
-
-### Caveats (read before trusting a ratio)
-
-- **Images are recompressed with *lossy* JPEG2000.** By default `catre` re-encodes
-  `.jpg/.png/.gif` to JPEG2000 (lossy). For a PNG/diagram you want to keep **bit-exact**,
-  pass `--store` (stores it with lossless DEFLATE instead).
-- **Already-compressed or tiny data barely shrinks.** PDF (93.5 %, almost no gain — it is
-  already DEFLATE-internally) and a small GIF (94.8 %) are near the floor. Re-compressing
-  something already compressed is inherently limited. It no longer *grows*, though: since
-  v1.3 a file is only stored as JPEG2000 when that actually beats DEFLATE (that GIF was
-  227 % in v1.2), and since v1.2 the PSNR-targeted encoder keeps large photos from bloating
-  at high `-q` — a 1 MB 4000×3000 JPEG is ~10 % at `-q 100`.
-- **`-q` is the lever.** The headline "super-compression" is photographic JPEG at
-  low/medium quality and Office documents — there the savings are 60–90 %.
-
-## Project layout
-
-```
-tools/catre.c            CAT RE v1.7 — native C archiver (main tool; build with `make catre`)
-qcf_tool/                Python reimplementation (same CLI + library)
-  catre.py               CAT RE v1.7 CLI (compress/extract/list/info/test)
-  qcm.py                 REAL QCM parser+encoder (single/multi/folders, validated)
-  format.py              low-level 28-byte QCF header primitive
-  dispatch.py            backend router
-  cli.py                 legacy library CLI (info/extract/pack/sniff)
-  backends/              raw / zip_ / jp2 / ole2
-
-libcat/                  C library (cat.h, format.c, dispatch.c, backends/)
-tools/cat-tool.c         older C CLI (libcat-based)
-
-tests/
-  test_*.py              pytest suite (Python)
-  c/                     C test sources (built into tests/runtests)
-  fixtures/real_qcf/     small real .qcf samples (synthetic inputs)
-  fixtures/real_office/  Apache POI Office docs + their .qcf
-
-docs/
-  QCF_FORMAT_SPEC.md     implementable format spec (start here)
-  RE_verified.md         binary-verified RE findings + evidence
-  RE_notes.md, SUMMARY.md, SESION_NOCTURNA.md, PLAN.md, LINUX_PORT.md
-
-scripts/
-  engine_matrix.py       conformance harness: original engine vs catre, file by file
-  build-linux-deps.sh    static OpenJPEG for `make catre`
-  build-win-deps.sh      static zlib + OpenJPEG for the mingw cross-builds
-
-harness/                 working Wine/MinGW harnesses (drive the original DLLs)
-  sfa.c                  produce/consume REAL .qcf via CompressFile
-  dec.c, dca.c           decompress/extract validators
-  multifile.c            multi-file Compress experiment
-
-OLD/  (git-ignored — NOT part of the public repo)
-  original/              the 2003 product: proprietary DLLs/installer (not redistributed)
-  samples/jpg-files/     76 MB JPEG corpus (test material)
-  fixtures-multi/        real multi-file + nested-folder ground-truth archives (large)
-  harness-experiments/   superseded exploratory probes
-  pll/                   packJPG-style lossless JPEG recompression experiment
-  resultados-jpg-test/   generated JPEG2000 comparison images
-
-ghidra/                  Ghidra project + scripts (git-ignored, large)
+```bash
+catre compress file.txt mydir/ -o out.qcf      # files & folders (native folder records)
+catre compress photo.png -o out.qcf -q 50      # images → JPEG2000 lossy (quality 0-100)
+catre list out.qcf -v                          # sizes, ratio, codec, date
+catre extract out.qcf -o ./restored/           # folders restored; images decoded to PNG
+catre info out.qcf                             # container + codec details
+catre test out.qcf                             # decode every member and verify it
 ```
 
-> **Note on `OLD/`**: it holds the original proprietary product binaries, large test
-> corpora, and experiments. It is git-ignored and **not uploaded** to the public repo.
-> The harness and some skipped tests use files under `OLD/` when present locally.
+Commands mirror the original software (`compress`/`c`, `extract`/`x`, `list`/`l`, `info`/`i`,
+`test`/`t`). `-q` sets the JPEG2000 **target PSNR**, calibrated to the original engine;
+`--store` forces lossless DEFLATE for files you need bit-exact. Every flag, the Python
+front-end and the caveats:
+**[Quick Start](https://github.com/YadeWira/cat-re/wiki/Quick-Start)**.
 
-## Legal & patents
+## How complete is it?
 
-This is an independent, interoperability-focused reimplementation. A few notes on
-why that is on solid ground — documented as due diligence, **not as legal advice**
-(consult a lawyer for anything that matters to you):
+Measured against the original engine, not asserted. `scripts/engine_matrix.py` compresses with
+the engine, decompresses **with the engine**, and compares — which turns the question into what
+is recoverable *at all*. Over 31 real Office documents:
 
-- **The "CAT" patents have expired.** "CAT" stands for *Cellular Automata Transform*,
-  invented by Olurinde E. Lafe and originally assigned to QuikCAT.com, Inc. The core
-  patents — e.g. [US6400766B1](https://patents.google.com/patent/US6400766B1/en) and
-  [US6456744B1](https://patents.google.com/patent/US6456744B1/en) (both filed 2000-04-18),
-  the CAT-encryption patent [US5677956A](https://patents.google.com/patent/US5677956A/en)
-  (1995), and the Miliki audio patent (2001) — were all filed between 1995 and 2001. US
-  utility patents run 20 years from filing, so the entire family has lapsed (the two main
-  ones are listed as *"Expired – Fee Related"*, anticipated expiration **2020-04-18**).
-  QuikCAT itself went through Chapter 11; its IP was sold off and the patents were
-  abandoned for non-payment of maintenance fees.
+| | engine restores exactly | engine does **not** |
+|---|:--:|:--:|
+| **`catre` restores exactly** | **22** | 0 |
+| **`catre` skips** | **0** | **9** |
 
-- **This clone does not even use CAT.** Despite the original product's "CAT" branding,
-  `catre` implements only **DEFLATE** (zlib — patent-free) and **JPEG2000** (whose Part 1
-  baseline was declared royalty-free by the JPEG committee). No cellular-automata transform
-  is implemented, so the CAT patents would not read on this code even if they were still alive.
+**Zero real gaps**: every member we skip is one the *original software* returns altered — it
+re-encodes the document instead of storing it. Same shape for PDF. A random 250-file corpus
+sample: 248 DEFLATE members, all byte-exact in both directions. Deliberately out of scope: the
+LEADTOOLS image codecs (a third party's IP, still sold today).
 
-- **Trademarks are separate from patents.** Names like *Choshuku*, *QuikCAT*, *Miliki*, and
-  *CAT* may have been trademarks (likely abandoned). This project only references them
-  descriptively (to say what it interoperates with) and does not present itself as, or use the
-  branding of, the original product.
+Details: **[Cloning Status](https://github.com/YadeWira/cat-re/wiki/Cloning-Status)** ·
+**[Codec Map](https://github.com/YadeWira/cat-re/wiki/Codec-Map)**.
 
-- **No proprietary code is redistributed.** The original DLLs, installer, and product manual
-  are kept out of this repository (see the `OLD/` note above). Everything here is either our
-  own reverse-engineered code, public-domain vendored code (`stb_image`), or
-  redistributable test fixtures (Apache POI sample documents).
+## Repository layout
+
+```
+tools/catre.c             the archiver (main tool) + catre_img.c (JPEG2000 via OpenJPEG)
+qcf_tool/                 Python reimplementation: reads every codec, writes DEFLATE
+libcat/, tools/cat-tool.c older C library and CLI, kept for reference
+harness/                  Wine/MinGW harnesses that drive the original DLLs
+scripts/engine_matrix.py  conformance harness: original engine vs catre, file by file
+tests/                    pytest suite (48) + real engine-made fixtures
+docs/                     the specification of record — QCF_FORMAT_SPEC.md, RE_verified.md
+```
+
+`docs/` is versioned with the code and is authoritative for the format; the wiki is the reading
+material around it.
 
 ## License
 
-MIT.
+MIT. The original DLLs, installer and manual are **not** redistributed here. The CAT patents
+have expired and this clone implements only DEFLATE and JPEG2000 — the reasoning is in
+**[Legal](https://github.com/YadeWira/cat-re/wiki/Legal)**.
