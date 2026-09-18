@@ -47,10 +47,13 @@ CODEC_IMAGE = 1     # images -> JPEG2000 codestream (CODEC4)
 CODEC_OLE2 = 2      # Office/OLE2 -> MSOC21 (36-byte header + zlib of whole compound file)
 # Codecs we recognize but cannot always decode (the original engine's own):
 CODEC_OFFICE_PS = 3  # MSOC21 per-stream: multi-mode, only its whole-file mode is decodable
-CODEC_LEAD = 4       # LEAD Technologies CMP/CMW (TIFF / medical) — third-party, opaque
+CODEC_LEAD = 4       # image sub-codec 0x09 — LEAD CMP/CMW (TIFF, some PNG), third-party
+CODEC_IMAGE_X = 5    # image sub-codec that is not JPEG2000 (0x02: GIF, paletted/gray PNG)
+CODEC_PDF = 6        # PdfProc: structural PDF payload, not zlib-of-file
 
 _CODEC_NAMES = {CODEC_DEFLATE: "deflate", CODEC_IMAGE: "image-jp2", CODEC_OLE2: "office",
-                CODEC_OFFICE_PS: "office-ps", CODEC_LEAD: "lead-cmp"}
+                CODEC_OFFICE_PS: "office-ps", CODEC_LEAD: "lead-cmp",
+                CODEC_IMAGE_X: "image-x", CODEC_PDF: "pdf-proc"}
 
 # MSOC21 whole-file header tail (engine wants it present & non-zero; not content-validated)
 _MSOC_TAIL = bytes.fromhex("def90b45711be40046cb1fe33400")
@@ -71,19 +74,23 @@ class QcmOpaqueCodec(QcmError):
 def classify_codec(data: bytes, hdr: int) -> int:
     """Codec of the member whose 28-byte QCF header starts at `hdr`.
 
-    Mirrors the C tool (tools/catre.c `classify_codec`): the codec byte at +0x18
-    distinguishes image from stream, +0x19 == 0x09 marks LEAD, and an MSOC21
-    office payload is told apart by its header: `32 01 12 00` = whole-file
-    (decodable), any other `32 01 xx 00` = per-stream.
+    Mirrors the C tool (tools/catre.c `classify_codec`), measured against the engine:
+    +0x18 tells image from stream; for an image, +0x19 is the sub-codec (0x01 =
+    JPEG2000, the only one with an FF4F codestream; 0x02 = GIF / paletted or gray
+    PNG; 0x09 = TIFF and some PNG, the LEAD path); for a stream, +0x1A is the family
+    (0x04 deflate, 0x02 office, 0x05 PDF), and an office payload of `32 01 12 00` is
+    the decodable whole-file mode while any other `32 01 xx 00` is per-stream.
     """
     if hdr + 0x1C > len(data):
         return CODEC_DEFLATE
-    c0, c1, ext = data[hdr + 0x18], data[hdr + 0x19], data[hdr + 0x1B]
+    c0, c1, c2, ext = data[hdr + 0x18], data[hdr + 0x19], data[hdr + 0x1A], data[hdr + 0x1B]
     pay = hdr + 0x1C + ext
-    if c0 == 0x01 and c1 == 0x09:
-        return CODEC_LEAD
     if c0 == 0x01:
-        return CODEC_IMAGE
+        if c1 == 0x01:
+            return CODEC_IMAGE
+        return CODEC_LEAD if c1 == 0x09 else CODEC_IMAGE_X
+    if c2 == 0x05:
+        return CODEC_PDF
     if data[pay:pay + 2] == b"\x32\x01":
         return CODEC_OLE2 if data[pay:pay + 4] == b"\x32\x01\x12\x00" else CODEC_OFFICE_PS
     return CODEC_DEFLATE
@@ -156,6 +163,13 @@ class QcmMember:
         if self.codec == CODEC_LEAD:
             raise QcmOpaqueCodec(
                 f"{self.name}: LEAD CMP/CMW (third-party) — needs the original Choshuku engine")
+        if self.codec == CODEC_IMAGE_X:
+            raise QcmOpaqueCodec(
+                f"{self.name}: image member without a JPEG2000 codestream (engine image "
+                "codec) — needs the original Choshuku engine")
+        if self.codec == CODEC_PDF:
+            raise QcmOpaqueCodec(
+                f"{self.name}: PdfProc structural payload — needs the original Choshuku engine")
         # Image: hand back the raw inner codestream for an OpenJPEG-capable caller.
         return self._payload
 

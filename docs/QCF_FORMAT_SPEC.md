@@ -68,11 +68,44 @@ El motor decide en tiempo de compresión. Byte `+0x18` del stream QCF: `1`=image
 
 | Entrada | Backend | Algoritmo | Lossless |
 |---|---|---|---|
-| PNG, GIF, BMP, JPEG | CODEC4 (vía IMGCMP) | **JPEG2000** Part-1 (Kakadu) | NO (lossy) |
+| BMP, JPEG (y PNG RGB, a veces) | CODEC4 (vía IMGCMP) | **JPEG2000** Part-1 (Kakadu) | NO (lossy) |
+| GIF, PNG con paleta/gris | sub-codec `+19=0x02` | otro codec del motor (no J2K) — opaco | NO |
 | TIFF, WAV, HTML, EXE, binario, ZIP | ZipDLL/zlib | **DEFLATE** (zlib 1.1.3) | sí |
-| PDF | PdfProc | **DEFLATE** (zlib 1.1.3) | sí (contenido) |
+| PDF | PdfProc | payload **estructural** propio (`32 01 78 …`), no zlib-del-archivo — opaco al leer | sí (contenido) |
 | DOC/XLS/PPT | MSOC21 | OLE2 + **DEFLATE** (zlib 1.1.3) por-stream | contenido sí; .xls no byte-exacto |
 | TIFF / grises 8-16 bit (médico) | LFCMP13n | **LEAD CMP/CMW** (LEADTOOLS, propietario) — codec id `0x09` | NO (8-bit aquí) |
+
+### Bytes de codec — TABLA MEDIDA contra el motor (2026-09-18) ✅
+
+Comprimiendo un corpus con el motor original bajo Wine y leyendo `inner+0x18/19/1A`:
+
+| Entrada | `+18` | `+19` | `+1A` | ¿codestream J2K (`FF4F`)? | qué es |
+|---|:--:|:--:|:--:|:--:|---|
+| texto / binario | 00 | 05 | 04 | — | DEFLATE (zlib) |
+| DOC/XLS/PPT | 00 | 00 | 02 | — | MSOC21 (office; whole-file `32 01 12 00` o per-stream) |
+| **PDF** | 00 | 00 | **05** | — | **PdfProc: payload estructural `32 01 78 …`, NO zlib-del-archivo** |
+| BMP, JPG | 01 | 01 | 04 | **sí** | JPEG2000 |
+| **GIF, PNG con paleta, PNG gris** | 01 | **02** | 04 | **NO** | otro codec de imagen del motor (opaco) |
+| **TIFF, algunos PNG RGB** | 01 | **09** | 04 | **NO** | ruta LEAD (CMP/CMW), opaco |
+
+- **`+0x19` es el sub-codec de imagen**, no un byte de relleno: solo `0x01` trae codestream
+  JPEG2000. Leer un member `0x02`/`0x09` como J2K produce basura (era un "FAILED decode"
+  hasta v1.6).
+- **`+0x1A` es la familia de stream**: `04` deflate, `02` office, `05` PDF. Es lo que separa
+  un member de PdfProc de uno de MSOC21 (ambos empiezan con `32 01`).
+- **Pendiente**: la elección entre `0x01` y `0x09` para PNG RGB **no está explicada**. Con el
+  mismo contenido, `.bmp` siempre va a J2K, pero un PNG RGB pequeño y de poca entropía fue a
+  `0x09` mientras una foto PNG del mismo tamaño fue a J2K. No es el tamaño ni el color-type
+  (IHDR idénticos). Sin resolver.
+
+### Orden de filas de las imágenes (BOTTOM-UP) ✅ medido
+
+El codestream J2K del motor guarda la **primera fila = fila inferior** de la imagen (su
+pipeline le pasa a CODEC4 un DIB de Windows, que es bottom-up). `catre` v1.0–v1.5 escribía y
+leía top-down: el round-trip propio no lo delataba (volteaba dos veces), pero **toda imagen
+intercambiada con el software original salía espejada verticalmente** (PSNR 10,6 dB tal cual
+vs 31,2 dB volteada). Corregido en v1.6; nuestra decodificación de un `.qcf` del motor coincide
+con la decodificación que hace **el propio motor** del mismo archivo a 35,8–38,6 dB.
 
 **Selección de codec de imagen por formato de ENTRADA** (verificado 2026-06-11 con el motor):
 PNG/GIF/BMP/JPG → **JPEG2000** (codec `01 01…`, payload con SOC `ff4f ff51`); **TIFF y grises de

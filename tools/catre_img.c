@@ -84,10 +84,16 @@ uint8_t *catre_encode_image(const uint8_t *data, size_t len, int quality, uint32
     opj_image_t *img = opj_image_create(3, cmp, OPJ_CLRSPC_SRGB);
     if(!img){ stbi_image_free(px); return NULL; }
     img->x0=0; img->y0=0; img->x1=w; img->y1=h;
-    for (int i=0;i<w*h;i++){
-        img->comps[0].data[i]=px[i*3+0];
-        img->comps[1].data[i]=px[i*3+1];
-        img->comps[2].data[i]=px[i*3+2];
+    /* ROW ORDER: the engine's codestream is BOTTOM-UP (its image pipeline hands
+     * CODEC4 a Windows DIB, whose first row is the bottom one). We decode with the
+     * same convention, so both sides agree: measured against the engine, writing
+     * rows top-down made every picture come out upside down (PSNR 10.6 dB as-is vs
+     * 31.2 dB flipped). Our own round-trip never showed it — it flipped twice. */
+    for (int y=0;y<h;y++){
+        const unsigned char *row = px + (size_t)(h-1-y)*w*3;
+        int *d0=img->comps[0].data+(size_t)y*w, *d1=img->comps[1].data+(size_t)y*w,
+            *d2=img->comps[2].data+(size_t)y*w;
+        for (int x=0;x<w;x++){ d0[x]=row[x*3+0]; d1[x]=row[x*3+1]; d2[x]=row[x*3+2]; }
     }
     stbi_image_free(px);
 
@@ -150,9 +156,10 @@ int catre_decode_image(const uint8_t *payload, uint32_t len, const char *out_pat
         opj_decode(cod,st,img) && opj_end_decompress(cod,st)){
         int w=img->comps[0].w, h=img->comps[0].h, nc=img->numcomps;
         unsigned char *rgb=malloc((size_t)w*h*3);
-        for (int i=0;i<w*h;i++) for(int c=0;c<3;c++){
-            int v = img->comps[nc>=3?c:0].data[i];
-            rgb[i*3+c] = v<0?0:v>255?255:v;
+        /* bottom-up codestream -> top-down PNG (see the note in the encoder) */
+        for (int y=0;y<h;y++) for (int x=0;x<w;x++) for (int c=0;c<3;c++){
+            int v = img->comps[nc>=3?c:0].data[(size_t)(h-1-y)*w + x];
+            rgb[((size_t)y*w + x)*3 + c] = v<0?0:v>255?255:v;
         }
         ok = stbi_write_png(out_path, w, h, 3, rgb, w*3);
         free(rgb);

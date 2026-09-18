@@ -1,4 +1,4 @@
-/* CAT RE v1.5 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
+/* CAT RE v1.6 — native C archiver for Choshuku/CAT `.qcf` (QCM) files.
  *
  * Free, reverse-engineered reimplementation. Reads the real format
  * (single-file, multi-file, nested folders) and writes the DEFLATE path.
@@ -29,7 +29,7 @@
 #endif
 #endif
 
-#define VERSION "1.5"
+#define VERSION "1.6"
 #define MAGIC_QCM 0x014D4351u
 #define MAGIC_QCF 0x01464351u
 #define CODEC_DEFLATE 0
@@ -44,8 +44,10 @@ int catre_verify_image(const uint8_t *payload, uint32_t len);
 #define CODEC_OLE2  2
 /* codecs we recognize but can't always decode (proprietary to the original engine) */
 #define CODEC_OFFICE_PS 3   /* MSOC21 per-stream: multi-mode (see cmd_extract)      */
-#define CODEC_LEAD      4   /* LEAD Technologies CMP/CMW (TIFF/medical), 3rd-party  */
-#define CODEC_UNKNOWN   5
+#define CODEC_LEAD      4   /* image sub-codec 0x09 — LEAD CMP/CMW, third-party      */
+#define CODEC_IMAGE_X   5   /* image sub-codec that is not JPEG2000 (e.g. 0x02: GIF) */
+#define CODEC_PDF       6   /* PdfProc: structural PDF payload, not zlib-of-file     */
+#define CODEC_UNKNOWN   7
 static const char *codec_name(uint32_t c);
 static int codec_decodable(uint32_t c);
 /* MSOC21 36-byte header tail (engine wants it present & non-zero; not content-validated) */
@@ -109,12 +111,24 @@ static uint8_t *read_file(const char *path, size_t *len){
 
 /* Classify a member's codec by inspecting its QCF header (+ payload start).
  * `qcf` = byte offset of the QCF magic. Recognizes codecs we can't decode too. */
+/* Codec bytes, measured against the engine itself (see docs/QCF_FORMAT_SPEC.md §5):
+ *   +0x18 = 1 -> image, 0 -> stream
+ *   image sub-codec at +0x19: 0x01 = JPEG2000 (the only one with an FF4F codestream),
+ *                             0x02 = non-J2K (GIF, paletted/grayscale PNG),
+ *                             0x09 = non-J2K (TIFF, some PNG) — the LEAD path
+ *   stream family at +0x1A:   0x04 = deflate, 0x02 = office (MSOC21), 0x05 = PDF (PdfProc)
+ * Only JPEG2000 images, deflate and the decodable office modes are ours to read; the
+ * rest must be IDENTIFIED (so `list` is honest) and skipped, never fed to a decoder. */
 static int classify_codec(const uint8_t *d, size_t len, size_t qcf){
     if (qcf+0x1c>len) return CODEC_UNKNOWN;
-    uint8_t c0=d[qcf+0x18], c1=d[qcf+0x19], ext=d[qcf+0x1b];
+    uint8_t c0=d[qcf+0x18], c1=d[qcf+0x19], c2=d[qcf+0x1a], ext=d[qcf+0x1b];
     size_t pay=qcf+0x1c+ext;
-    if (c0==0x01 && c1==0x09) return CODEC_LEAD;        /* LEAD CMP/CMW (TIFF/medical) */
-    if (c0==0x01) return CODEC_IMAGE;                   /* JPEG2000                    */
+    if (c0==0x01){                                      /* image member */
+        if (c1==0x01) return CODEC_IMAGE;               /*   JPEG2000                  */
+        if (c1==0x09) return CODEC_LEAD;                /*   LEAD CMP/CMW              */
+        return CODEC_IMAGE_X;                           /*   another engine image codec */
+    }
+    if (c2==0x05) return CODEC_PDF;                     /* PdfProc (structural payload) */
     if (pay+4<=len && d[pay]==0x32 && d[pay+1]==0x01){  /* MSOC21 office               */
         if (!memcmp(d+pay,"\x32\x01\x12\x00",4)) return CODEC_OLE2;   /* whole-file (decodable) */
         return CODEC_OFFICE_PS;                         /* per-stream (structural, opaque)        */
@@ -460,10 +474,21 @@ static int cmd_extract(int argc, char **argv){
             bar_clear();
             fprintf(stderr,"  SKIP %s: codec '%s' needs the original Choshuku engine "
                            "(%s) — cannot decode\n", mem[i].name, codec_name(mem[i].codec),
-                    mem[i].codec==CODEC_LEAD ? "LEAD CMP/CMW, third-party" : "unsupported");
+                    mem[i].codec==CODEC_LEAD ? "LEAD CMP/CMW, third-party" :
+                    mem[i].codec==CODEC_IMAGE_X ? "engine image codec, not JPEG2000" :
+                    mem[i].codec==CODEC_PDF ? "PdfProc structural payload" : "unsupported");
             skipped++; continue;
         }
         if (mem[i].codec==CODEC_IMAGE){          /* JPEG2000 -> decode to PNG */
+            /* the codestream must follow the 26-byte wrapper; if the SOC marker is
+             * missing this is not JPEG2000 after all — skip instead of "FAILED". */
+            size_t cs=mem[i].payoff+26;
+            if (cs+2>len || d[cs]!=0xFF || d[cs+1]!=0x4F){
+                bar_clear();
+                fprintf(stderr,"  SKIP %s: image member without a JPEG2000 codestream "
+                               "(engine image codec) — cannot decode\n", mem[i].name);
+                skipped++; continue;
+            }
             /* replace the member's extension with .png (don't append: file.png -> file.png, not file.png.png) */
             char stem[2048]; snprintf(stem,sizeof stem,"%s",mem[i].name);
             char *dot=strrchr(stem,'.'), *slash=strrchr(stem,'/');
@@ -500,7 +525,8 @@ static int cmd_extract(int argc, char **argv){
 
 static const char *codec_name(uint32_t c){
     return c==CODEC_DEFLATE?"deflate":c==CODEC_IMAGE?"image-jp2":c==CODEC_OLE2?"office":
-           c==CODEC_OFFICE_PS?"office-ps":c==CODEC_LEAD?"lead-cmp":"unknown";
+           c==CODEC_OFFICE_PS?"office-ps":c==CODEC_LEAD?"lead-cmp":
+           c==CODEC_IMAGE_X?"image-x":c==CODEC_PDF?"pdf-proc":"unknown";
 }
 /* can we actually decode this codec, or does it need the original engine? */
 static int codec_decodable(uint32_t c){ return c<=CODEC_OLE2; }

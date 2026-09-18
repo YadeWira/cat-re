@@ -7,7 +7,7 @@ Deliverables (the C tool runs on Linux **and** Windows):
 
 | Component     | Language | Purpose                                                |
 |---------------|----------|--------------------------------------------------------|
-| `tools/catre.c` | C      | **CAT RE v1.5** — the main archiver (zero-dependency static binary). |
+| `tools/catre.c` | C      | **CAT RE v1.6** — the main archiver (zero-dependency static binary). |
 | `qcf_tool/`   | Python   | Pure-Python reader (every codec identified) + DEFLATE writer. |
 | `libcat/`     | C        | Native port of the algorithms + `cat-tool` CLI.        |
 | `harness/`    | C        | Wine harness to drive the original Windows DLLs.       |
@@ -49,7 +49,7 @@ notes (format layout, codec dispatch table, COM IIDs, etc.).
 
 ## Quick start
 
-### CAT RE v1.5 CLI (recommended)
+### CAT RE v1.6 CLI (recommended)
 
 `catre` is the main archiver — a **native C** tool (links zlib + OpenJPEG statically; no
 original DLLs). It reads real `.qcf` (single/multi/nested folders) and writes DEFLATE +
@@ -85,7 +85,7 @@ It **writes only DEFLATE**: the JPEG2000/Office *encoders* live solely in the na
 ### Python library (`qcf-tool`)
 
 ```bash
-# 46 tests, all green
+# 47 tests, all green
 PYTHONPATH=. python3 -m pytest tests/ -v
 
 # Inspect a .qcf file
@@ -133,6 +133,8 @@ denominator matters — **≈90 % of the engine, ≈60 % of the full desktop pro
 | JPEG2000 image codec (read + write, `-q`) | ✅ **~99 %** | PSNR-targeted, calibrated to the engine's quality→PSNR curve (validated: same PSNR per `-q` on test images). **Byte-exact is impossible** (we use OpenJPEG, the original uses Kakadu) but quality and size now track the engine |
 | Office MSOC21 — whole-file variant | ✅ **100 %** | read + write, engine-validated |
 | Office MSOC21 — per-stream variant (real Word/Excel) | 🟡 **partial** | it's **multi-mode**: its *whole-file zlib* mode is lossless and **decoded** (shipping `catre` and the Python front-end both extract those members byte-exact, since v1.5); the *structural-model* and *sparse-XLS (non-deflate)* modes are opaque/custom and out of scope — those members are listed and skipped with a clear message |
+| PDF (`PdfProc`) — reading engine archives | ❌ **not decodable** | writing is fine (we DEFLATE the file and the engine restores it byte-exact), but the *engine's own* PDF members hold a structural payload (`32 01 78 …`), not zlib-of-file — identified as `pdf-proc` and skipped |
+| Engine image codec `0x02` (GIF, paletted/gray PNG) | ❌ **not decodable** | measured 2026-09: not JPEG2000 at all (no `FF4F` codestream); identified as `image-x` and skipped |
 | LFC / LEADTOOLS codec | ❌ **out of scope** | confirmed (2026-06) to be **LEAD Technologies' proprietary CMP/CMW** format (`LFCMP13n.dll`). The engine selects it by input type — **TIFF / high-bit-depth grayscale → LEAD CMP** (codec id `0x09`); PNG/GIF/BMP/JPG → JPEG2000. It is a *third party's* IP with no public spec and no open decoder (LEADTOOLS is still a sold product), so reimplementing it is off-limits — unlike the expired QuikCAT/CAT patents. Also lossy here (16-bit → 8-bit). |
 | **Engine overall** | **~90 %** | everything needed to read/write `.qcf` for files, images, folders, and generic Office |
 
@@ -152,6 +154,12 @@ project). See the details below.
 
 ## Status & limitations
 
+> **Images and the original software (v1.6).** The engine's JPEG2000 codestream is
+> **bottom-up**; `catre` v1.0–v1.5 wrote and read rows top-down, so pictures exchanged with
+> the original program came out vertically mirrored (our own round-trip hid it — it flipped
+> twice). Fixed in v1.6, verified against the engine's own decode. Images written by
+> v1.0–v1.5 carry the old row order and will extract upside down under v1.6.
+
 **Reading** (validated against real engine archives):
 - Any `.qcf`: single-file, multi-file, and nested folders.
 - DEFLATE members → decompressed losslessly (zlib).
@@ -160,9 +168,13 @@ project). See the details below.
 - Office/OLE2 members in the **whole-file `MSOC21` variant** → decompressed. Per-stream
   (`office-ps`) members written in the engine's **whole-file zlib mode** → decompressed
   **byte-exact** (v1.5); its structural/sparse modes stay opaque.
-- Members using the engine's **proprietary codecs we can't decode** (per-stream Office,
-  LEAD CMP) are now **listed and identified** by `list`, and `extract` **skips them with a
-  clear message** instead of failing the whole archive (v1.4). See below.
+- Members using the engine's **proprietary codecs we can't decode** are **listed and
+  identified** by `list`, and `extract` **skips them with a clear message** instead of
+  failing the whole archive. Measured against the engine (v1.6), those are: per-stream
+  Office in its opaque modes (`office-ps`), the LEAD path (`lead-cmp`: TIFF, some PNG), a
+  second engine image codec (`image-x`: GIF, paletted/grayscale PNG — it carries no
+  JPEG2000 codestream), and PDF members (`pdf-proc`: `PdfProc` writes a structural payload,
+  not zlib-of-file). See below.
 
 **Writing** (`catre compress`):
 - **DEFLATE** for generic files, with **native nested-folder records** — verified: the
@@ -240,9 +252,9 @@ output size tracks image content like the real engine does. A 628 KB photographi
 ## Project layout
 
 ```
-tools/catre.c            CAT RE v1.5 — native C archiver (main tool; build with `make catre`)
+tools/catre.c            CAT RE v1.6 — native C archiver (main tool; build with `make catre`)
 qcf_tool/                Python reimplementation (same CLI + library)
-  catre.py               CAT RE v1.5 CLI (compress/extract/list/info/test)
+  catre.py               CAT RE v1.6 CLI (compress/extract/list/info/test)
   qcm.py                 REAL QCM parser+encoder (single/multi/folders, validated)
   format.py              low-level 28-byte QCF header primitive
   dispatch.py            backend router

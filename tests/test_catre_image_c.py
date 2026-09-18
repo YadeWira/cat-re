@@ -82,3 +82,39 @@ def test_store_fallback_never_grows(tmp_path):
     # with the fallback, the member is stored via deflate, not blown up by JPEG2000
     lst = _run("list", str(qcf), "-v", "--no-progress")
     assert "deflate" in lst.stdout, lst.stdout
+
+
+def _band_mean(img):
+    """Mean luminance of a crop, without the deprecated getdata()."""
+    data = img.tobytes()
+    return sum(data) / len(data)
+
+
+def test_engine_image_decodes_right_side_up():
+    """Engine images must not come out upside down (regression, v1.6).
+
+    The engine's JPEG2000 codestream is bottom-up (its pipeline feeds CODEC4 a
+    Windows DIB, whose first row is the bottom one). v1.0-v1.5 wrote rows
+    top-down, so every picture exchanged with the original software was flipped —
+    invisible in our own round-trip, which flipped twice. Measured against the
+    engine: 10.6 dB as-is vs 31.2 dB flipped; after the fix our decode matches the
+    engine's OWN decode of the same archive at 35.8-38.6 dB.
+
+    `real.jpg.qcf` is an engine-made archive (a cityscape: bright sky on top, dark
+    street below), so the top band being much brighter than the bottom one is a
+    cheap, stable flip detector.
+    """
+    Image = pytest.importorskip("PIL.Image", reason="Pillow not installed")
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        arc = os.path.join(ROOT, "tests", "fixtures", "real_qcf", "real.jpg.qcf")
+        r = _run("extract", arc, "-o", td, "--no-progress")
+        assert r.returncode == 0, r.stderr
+        png = os.path.join(td, "real.png")
+        assert os.path.isfile(png), r.stdout + r.stderr
+        im = Image.open(png).convert("L")
+        w, h = im.size
+        band = max(1, h // 10)
+        top = _band_mean(im.crop((0, 0, w, band)))
+        bottom = _band_mean(im.crop((0, h - band, w, h)))
+        assert top > 2 * bottom, f"image looks flipped: top={top:.1f} bottom={bottom:.1f}"

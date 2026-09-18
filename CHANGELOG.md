@@ -3,6 +3,44 @@
 All notable changes to **CAT RE** (the native `catre` archiver). Dates are UTC.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.6 — 2026-09-18
+
+Found by running the **original DLLs** (Wine) against `catre` on the same inputs and
+comparing bytes, rather than trusting our own round-trip.
+
+### Fixed
+- **Images were exchanged upside down with the original software.** The engine's
+  JPEG2000 codestream is **bottom-up** (its pipeline feeds CODEC4 a Windows DIB,
+  whose first row is the bottom one); we wrote and read rows top-down. Our own
+  round-trip never showed it — it flipped twice — but every picture handed to or
+  taken from the original engine was vertically mirrored (PSNR 10.6 dB as-is vs
+  31.2 dB flipped). Both sides now use the engine's order; our decode of an engine
+  archive matches the engine's **own** decode of it at 35.8–38.6 dB.
+  *Compatibility note*: images written by `catre` **v1.0–v1.5** carry the old row
+  order, so v1.6 extracts those upside down. Re-create such archives if it matters.
+- **Engine image members that are not JPEG2000 were reported as a failed decode.**
+  The image sub-codec byte (`+0x19`) has at least three values: `0x01` = JPEG2000,
+  `0x02` = another engine codec (GIF, paletted/grayscale PNG), `0x09` = the LEAD
+  path (TIFF, some PNG). Only `0x01` carries an `FF4F` codestream. Non-J2K members
+  are now identified (`image-x`, `lead-cmp`) and skipped cleanly, and `extract`
+  checks for the codestream marker before calling the decoder.
+- **Engine PDF members were mislabelled `office-ps`.** `PdfProc` writes its own
+  structural payload (`32 01 78 …`), not zlib-of-file; it is told apart by the
+  stream-family byte `+0x1A` (`0x05` = PDF, `0x02` = office, `0x04` = deflate) and
+  now lists as `pdf-proc`. We still cannot decode it — but we no longer pretend the
+  member is something else.
+
+### Changed
+- `docs/QCF_FORMAT_SPEC.md` §5 now carries the measured codec-byte table and the
+  row-order rule; `docs/RE_verified.md` gained the engine-vs-`catre` exactness
+  matrix behind all of this.
+
+### Verified
+- Windows 7 SP1, x86 and x64: labelling, `test`, and byte-exact Office extraction
+  (`fc /b`). The x64 build decodes an image **byte-identically to the Linux build**;
+  the x86 build differs by at most 1 unit per channel (92 dB), which is 32-bit
+  floating-point rounding in the wavelet reconstruction, not a logic difference.
+
 ## v1.5 — 2026-09-18
 
 ### Fixed

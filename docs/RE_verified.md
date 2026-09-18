@@ -466,3 +466,46 @@ con zlib + OpenJPEG.
    de las notas viejas es falso, ver §9), `PdfProc` (re-deflate de FlateDecode), `LFC`/LEADTOOLS
    (sin muestras). Difíciles y de bajo valor.
 3. Reimplementar el **encoder** (escribir QCM, no solo leer) en `libcat`/`qcf_tool`.
+
+## 10. Matriz de exactitud byte a byte — motor original vs CAT RE (2026-09-18)
+
+Método: prefijo Wine con los DLLs originales re-registrados (`MStream`, `CODEC4`, `IMGCMP`,
+`PdfProc`, `MSOC21`, `QCArch` + LEADTOOLS/Zip en `system32`), harness `sfa.exe` (comprimir) y
+`dec.exe` (descomprimir), `lQuality=100`. Para cada entrada se hicieron cuatro cosas: el motor
+comprime, `catre` comprime lo mismo, `catre` extrae el `.qcf` **del motor**, y el motor
+descomprime el `.qcf` **nuestro**.
+
+| Entrada | codec del motor | motor→`catre` (extracción) | `catre`→motor (round-trip) |
+|---|---|---|---|
+| texto 20 KB | deflate | ✅ byte-exacto | ✅ byte-exacto |
+| binario aleatorio 4 KB | deflate | ✅ byte-exacto | ✅ byte-exacto |
+| `.doc` 2 KB | office whole-file | ✅ byte-exacto | ✅ byte-exacto |
+| `.doc` 28 KB | office whole-file | ✅ byte-exacto | ✅ byte-exacto |
+| `.doc` 27 KB | office per-stream (modo opaco) | ⏭️ saltado | ✅ byte-exacto |
+| `.xls` 17 KB | office per-stream (modo opaco) | ⏭️ saltado | ✅ byte-exacto |
+| `.pdf` 112 KB | **pdf-proc** (estructural) | ⏭️ saltado | ✅ byte-exacto |
+| `.gif` 4,5 KB | **image sub-codec 0x02** (no J2K) | ⏭️ saltado | ✅ byte-exacto |
+| `.png` 324 KB | image JPEG2000 | 🔶 lossy por diseño | 🔶 lossy por diseño |
+| `.jpg` 628 KB | image JPEG2000 | 🔶 lossy por diseño | 🔶 lossy por diseño |
+
+**Contenedor**: para el camino deflate, el `.qcf` que produce `catre` es **idéntico al del motor
+salvo 2 bytes** — el datetime DOS del directorio (hora de compresión). En el camino office
+whole-file difieren 5: esos 2 más 3 del `tail14` constante del header MSOC21 (que el motor
+escribe distinto pero **no valida**, §5 del spec). Mismo tamaño total en ambos casos.
+
+**Imágenes**: lo único no byte-exacto por diseño (JPEG2000 lossy). Medido en PSNR sobre una foto
+de 628 KB a `q=100`: motor→`catre` **33,2 dB**, `catre`→motor **31,2 dB**, ciclo propio 32,4 dB —
+todo dentro de la curva documentada del motor (26,7–32,2 dB). Comparando nuestra decodificación
+contra la del **propio motor** del mismo `.qcf` (`OLD/resultados-jpg-test/recuperado_q*.jpg`):
+**35,8 dB (q100) / 37,4 (q50) / 38,6 (q0)**.
+
+### Lo que esta pasada destapó (arreglado en v1.6)
+
+1. **Filas invertidas**: el codestream del motor es **bottom-up**; escribíamos/leíamos top-down.
+   Nuestro round-trip propio no lo mostraba (volteaba dos veces), pero toda imagen intercambiada
+   con el software original salía espejada: 10,6 dB tal cual vs 31,2 dB al voltear.
+2. **`+0x19` es el sub-codec de imagen** (0x01 J2K / 0x02 otro / 0x09 LEAD): un GIF del motor no
+   tiene codestream J2K y nuestro lector lo mandaba igual a OpenJPEG → "FAILED decode".
+3. **`+0x1A` separa PDF (0x05) de office (0x02)**: los members de `PdfProc` se etiquetaban
+   `office-ps`. Su payload es estructural (`32 01 78 …`), no `zlib(archivo)` — o sea que el
+   camino PDF del motor **no es** "deflate del archivo" como decía la tabla vieja.
